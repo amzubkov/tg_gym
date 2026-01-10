@@ -1,10 +1,57 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InputMediaPhoto
 
-from keyboards import programs_kb, days_kb, exercises_kb, exercise_detail_kb
+from keyboards import (
+    programs_kb, days_kb, exercises_kb, exercise_detail_kb,
+    all_workouts_kb, tags_kb, tag_exercises_kb
+)
 import database as db
 
 router = Router()
+
+
+@router.callback_query(F.data == "all_workouts")
+async def show_all_workouts(callback: CallbackQuery):
+    """Подменю 'Все тренировки'."""
+    await callback.message.edit_text(
+        "📚 Все тренировки\n\nВыбери способ просмотра:",
+        reply_markup=all_workouts_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tags_menu")
+async def show_tags_menu(callback: CallbackQuery):
+    """Показать список тегов."""
+    tags = await db.get_all_tags()
+
+    if not tags:
+        await callback.answer("Пока нет тегов", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🏷 Выбери тег:",
+        reply_markup=tags_kb(tags)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tag:"))
+async def show_tag_exercises(callback: CallbackQuery):
+    """Показать упражнения по тегу."""
+    tag_name = callback.data.split(":", 1)[1]
+
+    exercises = await db.get_exercises_by_tag(tag_name)
+
+    if not exercises:
+        await callback.answer("Нет упражнений с этим тегом", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"🏷 #{tag_name}\n\nУпражнения:",
+        reply_markup=tag_exercises_kb(exercises, tag_name)
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "programs")
@@ -64,11 +111,15 @@ async def show_day_exercises(callback: CallbackQuery):
         return
 
     day_name = day["name"] if day["name"] else f"День {day['day_number']}"
+    text = f"📋 {program['name']} — {day_name}\n\nВыбери упражнение:"
+    kb = exercises_kb(exercises, day_id)
 
-    await callback.message.edit_text(
-        f"📋 {program['name']} — {day_name}\n\nВыбери упражнение:",
-        reply_markup=exercises_kb(exercises, day_id)
-    )
+    # Если текущее сообщение — фото, удаляем и отправляем текст
+    if callback.message.photo:
+        await callback.message.delete()
+        await callback.message.answer(text, reply_markup=kb)
+    else:
+        await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -93,6 +144,8 @@ async def back_to_days(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("exercise:"))
 async def show_exercise(callback: CallbackQuery):
     """Показать упражнение с картинкой."""
+    from config import ADMIN_ID
+
     exercise_id = int(callback.data.split(":")[1])
     exercise = await db.get_exercise(exercise_id)
 
@@ -115,7 +168,8 @@ async def show_exercise(callback: CallbackQuery):
         for log in last_workout:
             text += f"  Подход {log['set_num']}: {log['weight']} кг × {log['reps']} раз\n"
 
-    kb = exercise_detail_kb(exercise_id, exercise["day_id"])
+    is_admin = user_id == ADMIN_ID
+    kb = exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=is_admin)
 
     # Если есть картинка — отправляем фото
     if exercise["image_file_id"]:

@@ -6,12 +6,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
 from database import init_db
+from middleware import AccessMiddleware
 from handlers import (
+    access_router,
     start_router,
     exercises_router,
     tracking_router,
     history_router,
     admin_router,
+    custom_router,
 )
 
 logging.basicConfig(
@@ -30,12 +33,18 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Регистрация роутеров
+    # Middleware для проверки доступа
+    dp.message.middleware(AccessMiddleware())
+    dp.callback_query.middleware(AccessMiddleware())
+
+    # Регистрация роутеров (access первый!)
+    dp.include_router(access_router)
     dp.include_router(start_router)
     dp.include_router(exercises_router)
     dp.include_router(tracking_router)
     dp.include_router(history_router)
     dp.include_router(admin_router)
+    dp.include_router(custom_router)
 
     logger.info("Starting bot...")
 

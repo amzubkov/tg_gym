@@ -43,6 +43,7 @@ class AddExercise(StatesGroup):
     waiting_for_day = State()
     waiting_for_name = State()
     waiting_for_description = State()
+    waiting_for_tag = State()
     waiting_for_image = State()
 
 
@@ -346,11 +347,19 @@ async def process_exercise_name(message: Message, state: FSMContext):
 async def skip_exercise_description(callback: CallbackQuery, state: FSMContext):
     """Пропустить описание."""
     await state.update_data(description=None)
-    await state.set_state(AddExercise.waiting_for_image)
+    await state.set_state(AddExercise.waiting_for_tag)
+
+    # Показываем существующие теги
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
 
     await callback.message.edit_text(
-        "Теперь отправь картинку упражнения (или нажми Пропустить):",
-        reply_markup=skip_kb("skip_ex_image")
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=skip_kb("skip_ex_tag")
     )
     await callback.answer()
 
@@ -360,9 +369,44 @@ async def process_exercise_description(message: Message, state: FSMContext):
     """Обработка описания."""
     description = message.text.strip()
     await state.update_data(description=description)
+    await state.set_state(AddExercise.waiting_for_tag)
+
+    # Показываем существующие теги
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
+
+    await message.answer(
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=skip_kb("skip_ex_tag")
+    )
+
+
+@router.callback_query(AddExercise.waiting_for_tag, F.data == "skip_ex_tag")
+async def skip_exercise_tag(callback: CallbackQuery, state: FSMContext):
+    """Пропустить тег."""
+    await state.update_data(tag=None)
+    await state.set_state(AddExercise.waiting_for_image)
+
+    await callback.message.edit_text(
+        "Теперь отправь картинку упражнения (или нажми Пропустить):",
+        reply_markup=skip_kb("skip_ex_image")
+    )
+    await callback.answer()
+
+
+@router.message(AddExercise.waiting_for_tag)
+async def process_exercise_tag(message: Message, state: FSMContext):
+    """Обработка тега."""
+    tag = message.text.strip().lower()
+    await state.update_data(tag=tag)
     await state.set_state(AddExercise.waiting_for_image)
 
     await message.answer(
+        f"Тег: #{tag}\n\n"
         "Теперь отправь картинку упражнения (или нажми Пропустить):",
         reply_markup=skip_kb("skip_ex_image")
     )
@@ -377,12 +421,14 @@ async def skip_exercise_image(callback: CallbackQuery, state: FSMContext):
         day_id=data["day_id"],
         name=data["exercise_name"],
         description=data.get("description"),
-        image_file_id=None
+        image_file_id=None,
+        tag=data.get("tag")
     )
 
     await state.clear()
+    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
     await callback.message.edit_text(
-        f"✅ Упражнение «{data['exercise_name']}» добавлено в {data['day_name']}!",
+        f"✅ Упражнение «{data['exercise_name']}»{tag_text} добавлено в {data['day_name']}!",
         reply_markup=admin_panel_kb()
     )
     await callback.answer()
@@ -401,12 +447,14 @@ async def process_exercise_image(message: Message, state: FSMContext):
         day_id=data["day_id"],
         name=data["exercise_name"],
         description=data.get("description"),
-        image_file_id=file_id
+        image_file_id=file_id,
+        tag=data.get("tag")
     )
 
     await state.clear()
+    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
     await message.answer(
-        f"✅ Упражнение «{data['exercise_name']}» с картинкой добавлено в {data['day_name']}!",
+        f"✅ Упражнение «{data['exercise_name']}»{tag_text} добавлено в {data['day_name']}!",
         reply_markup=admin_panel_kb()
     )
 
@@ -709,4 +757,189 @@ async def do_delete_exercise(callback: CallbackQuery):
     else:
         await callback.answer("Упражнение не найдено", show_alert=True)
 
+    await callback.answer()
+
+
+# ==================== MANAGE USERS ====================
+
+@router.callback_query(F.data == "manage_users")
+async def manage_users(callback: CallbackQuery):
+    """Показать список пользователей."""
+    users = await db.get_all_allowed_users()
+
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    if not users:
+        text = "👥 Пользователи\n\nПока нет одобренных пользователей."
+    else:
+        text = f"👥 Пользователи ({len(users)}):\n\n"
+        for u in users:
+            name = u["full_name"] or u["username"] or str(u["user_id"])
+            text += f"• {name}\n"
+
+    builder = InlineKeyboardBuilder()
+    if users:
+        builder.row(
+            InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data="remove_user_menu")
+        )
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="admin_menu")
+    )
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "remove_user_menu")
+async def remove_user_menu(callback: CallbackQuery):
+    """Выбор пользователя для удаления."""
+    users = await db.get_all_allowed_users()
+
+    if not users:
+        await callback.answer("Нет пользователей", show_alert=True)
+        return
+
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    builder = InlineKeyboardBuilder()
+    for u in users:
+        name = u["full_name"] or u["username"] or str(u["user_id"])
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🗑 {name}",
+                callback_data=f"remove_user:{u['user_id']}"
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="manage_users")
+    )
+
+    await callback.message.edit_text(
+        "🗑 Выбери пользователя для удаления доступа:",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("remove_user:"))
+async def remove_user(callback: CallbackQuery):
+    """Удалить пользователя."""
+    user_id = int(callback.data.split(":")[1])
+
+    await db.remove_allowed_user(user_id)
+
+    await callback.message.edit_text(
+        f"✅ Пользователь удалён из списка доступа!",
+        reply_markup=admin_panel_kb()
+    )
+    await callback.answer()
+
+
+# ==================== MANAGE TAGS ====================
+
+@router.callback_query(F.data == "manage_tags")
+async def manage_tags(callback: CallbackQuery):
+    """Показать список тегов."""
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    tags = await db.get_all_tags()
+
+    if not tags:
+        text = "🏷 Теги\n\nПока нет тегов. Теги создаются автоматически при добавлении упражнений."
+    else:
+        text = "🏷 Теги\n\nИспользуемые теги:\n\n"
+        for tag in tags:
+            text += f"• #{tag['name']} ({tag['exercise_count']} упр.)\n"
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="admin_menu")
+    )
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+class EditExerciseTag(StatesGroup):
+    waiting_for_tag = State()
+
+
+@router.callback_query(F.data.startswith("edit_tags:"))
+async def edit_exercise_tag(callback: CallbackQuery, state: FSMContext):
+    """Изменить тег упражнения."""
+    exercise_id = int(callback.data.split(":")[1])
+    exercise = await db.get_exercise(exercise_id)
+
+    if not exercise:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    await state.update_data(exercise_id=exercise_id)
+    await state.set_state(EditExerciseTag.waiting_for_tag)
+
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
+
+    current_tag = f"Текущий тег: #{exercise['tag']}" if exercise.get("tag") else "Тег не установлен"
+
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    builder = InlineKeyboardBuilder()
+    if exercise.get("tag"):
+        builder.row(
+            InlineKeyboardButton(text="🗑 Убрать тег", callback_data=f"remove_tag:{exercise_id}")
+        )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"exercise:{exercise_id}")
+    )
+
+    await callback.message.edit_text(
+        f"🏷 Тег для «{exercise['name']}»\n\n"
+        f"{current_tag}{tags_hint}\n\n"
+        "Введи новый тег:",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.message(EditExerciseTag.waiting_for_tag)
+async def process_edit_tag(message: Message, state: FSMContext):
+    """Сохранить новый тег упражнения."""
+    data = await state.get_data()
+    exercise_id = data["exercise_id"]
+    new_tag = message.text.strip().lower()
+
+    await db.update_exercise_tag(exercise_id, new_tag)
+    await state.clear()
+
+    exercise = await db.get_exercise(exercise_id)
+
+    from keyboards import exercise_detail_kb
+    await message.answer(
+        f"✅ Тег для «{exercise['name']}» изменён на #{new_tag}",
+        reply_markup=exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=True)
+    )
+
+
+@router.callback_query(F.data.startswith("remove_tag:"))
+async def remove_exercise_tag(callback: CallbackQuery, state: FSMContext):
+    """Убрать тег у упражнения."""
+    exercise_id = int(callback.data.split(":")[1])
+
+    await db.update_exercise_tag(exercise_id, None)
+    await state.clear()
+
+    exercise = await db.get_exercise(exercise_id)
+
+    from keyboards import exercise_detail_kb
+    await callback.message.edit_text(
+        f"✅ Тег для «{exercise['name']}» удалён",
+        reply_markup=exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=True)
+    )
     await callback.answer()

@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 from aiogram import Router, F
@@ -15,7 +16,6 @@ class LogWorkout(StatesGroup):
     """Состояния для записи тренировки."""
     waiting_for_weight = State()
     waiting_for_reps = State()
-    waiting_for_set = State()
 
 
 @router.callback_query(F.data.startswith("log:"))
@@ -82,50 +82,39 @@ async def process_weight(message: Message, state: FSMContext):
 
     data = await state.get_data()
     await message.answer(
-        f"💪 {data['exercise_name']}\n"
-        f"Вес: {weight} кг\n\n"
-        f"Введи количество повторений:",
+        f"💪 {data['exercise_name']} — {weight} кг\n\n"
+        f"Введи повторы×подходы:\n"
+        f"Например: <code>15x3</code> или <code>12</code>",
+        parse_mode="HTML",
         reply_markup=cancel_kb()
     )
 
 
 @router.message(LogWorkout.waiting_for_reps)
 async def process_reps(message: Message, state: FSMContext):
-    """Обработка повторений."""
-    try:
-        reps = int(message.text)
-        if reps < 1 or reps > 1000:
-            raise ValueError()
-    except (ValueError, TypeError):
+    """Обработка повторений и подходов."""
+    text = message.text.strip().lower()
+
+    # Парсим формат: "15x3", "15х3", "15*3", "15-3", или просто "15"
+    match = re.match(r'^(\d+)\s*[xх×*\-]\s*(\d+)$', text)
+    if match:
+        reps = int(match.group(1))
+        sets = int(match.group(2))
+    else:
+        try:
+            reps = int(text)
+            sets = 1
+        except ValueError:
+            await message.answer(
+                "❌ Формат: <code>15x3</code> или <code>12</code>",
+                parse_mode="HTML",
+                reply_markup=cancel_kb()
+            )
+            return
+
+    if reps < 1 or reps > 1000 or sets < 1 or sets > 20:
         await message.answer(
-            "Введи корректное количество повторений (число от 1 до 1000):",
-            reply_markup=cancel_kb()
-        )
-        return
-
-    await state.update_data(reps=reps)
-    await state.set_state(LogWorkout.waiting_for_set)
-
-    data = await state.get_data()
-    await message.answer(
-        f"💪 {data['exercise_name']}\n"
-        f"Вес: {data['weight']} кг\n"
-        f"Повторений: {reps}\n\n"
-        f"Введи номер подхода (или отправь 0 для авто):",
-        reply_markup=cancel_kb()
-    )
-
-
-@router.message(LogWorkout.waiting_for_set)
-async def process_set(message: Message, state: FSMContext):
-    """Обработка номера подхода и сохранение."""
-    try:
-        set_num = int(message.text)
-        if set_num < 0 or set_num > 100:
-            raise ValueError()
-    except (ValueError, TypeError):
-        await message.answer(
-            "Введи корректный номер подхода (0-100):",
+            "❌ Повторы 1-1000, подходы 1-20",
             reply_markup=cancel_kb()
         )
         return
@@ -133,35 +122,35 @@ async def process_set(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
 
-    # Если 0 — автоматический номер подхода
-    if set_num == 0:
-        # Считаем подходы за сегодня
-        from aiosqlite import connect
-        from config import DATABASE_PATH
-        async with connect(DATABASE_PATH) as conn:
-            cursor = await conn.execute(
-                """SELECT COUNT(*) FROM workout_logs
-                   WHERE user_id = ? AND exercise_id = ? AND date = ?""",
-                (user_id, data["exercise_id"], data["date"])
-            )
-            count = (await cursor.fetchone())[0]
-            set_num = count + 1
+    # Получаем текущее количество подходов
+    from aiosqlite import connect
+    from config import DATABASE_PATH
+    async with connect(DATABASE_PATH) as conn:
+        cursor = await conn.execute(
+            """SELECT COUNT(*) FROM workout_logs
+               WHERE user_id = ? AND exercise_id = ? AND date = ?""",
+            (user_id, data["exercise_id"], data["date"])
+        )
+        current_count = (await cursor.fetchone())[0]
 
-    # Сохраняем
-    await db.log_workout(
-        user_id=user_id,
-        exercise_id=data["exercise_id"],
-        weight=data["weight"],
-        reps=data["reps"],
-        set_num=set_num,
-        date=data["date"]
-    )
+    # Сохраняем каждый подход
+    for i in range(sets):
+        set_num = current_count + i + 1
+        await db.log_workout(
+            user_id=user_id,
+            exercise_id=data["exercise_id"],
+            weight=data["weight"],
+            reps=reps,
+            set_num=set_num,
+            date=data["date"]
+        )
 
     await state.clear()
 
+    sets_text = f"× {sets} подходов" if sets > 1 else ""
     await message.answer(
-        f"✅ Записано!\n\n"
-        f"💪 {data['exercise_name']}\n"
-        f"Подход {set_num}: {data['weight']} кг × {data['reps']} раз",
+        f"✅ <b>{data['exercise_name']}</b>\n"
+        f"{data['weight']} кг × {reps} {sets_text}",
+        parse_mode="HTML",
         reply_markup=back_to_exercise_kb(data["exercise_id"])
     )
