@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from keyboards import cancel_kb, back_to_exercise_kb
+from keyboards import cancel_kb, weight_kb, reps_kb, sets_kb, after_log_kb
 import database as db
 
 router = Router()
@@ -16,6 +16,7 @@ class LogWorkout(StatesGroup):
     """Состояния для записи тренировки."""
     waiting_for_weight = State()
     waiting_for_reps = State()
+    waiting_for_sets = State()
 
 
 @router.callback_query(F.data.startswith("log:"))
@@ -28,44 +29,89 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Упражнение не найдено", show_alert=True)
         return
 
-    # Получаем последний подход сегодня для определения номера
     user_id = callback.from_user.id
     today = date.today().isoformat()
 
-    # Сохраняем данные в состояние
+    # Получаем day_id и список упражнений дня для навигации
+    day_id = exercise["day_id"] if "day_id" in exercise.keys() else None
+    next_exercise_id = None
+
+    if day_id:
+        exercises = await db.get_exercises_by_day(day_id)
+        for i, ex in enumerate(exercises):
+            if ex["id"] == exercise_id and i + 1 < len(exercises):
+                next_exercise_id = exercises[i + 1]["id"]
+                break
+
+    # weight_type: 0=без веса, 10=гантели, 100=штанга
+    weight_type = exercise["weight_type"] if "weight_type" in exercise.keys() else 10
+
     await state.update_data(
         exercise_id=exercise_id,
         exercise_name=exercise["name"],
+        day_id=day_id,
+        next_exercise_id=next_exercise_id,
+        weight_type=weight_type,
         date=today
     )
 
-    # Получаем последнюю тренировку для подсказки
-    last_workout = await db.get_last_workout(user_id, exercise_id)
-    hint = ""
-    if last_workout:
-        last = last_workout[0]
-        hint = f"\n\n💡 В прошлый раз: {last['weight']} кг"
+    # Если weight_type=0, пропускаем шаг с весом
+    if weight_type == 0:
+        await state.update_data(weight=0)
+        await state.set_state(LogWorkout.waiting_for_reps)
+        await callback.message.answer(
+            f"💪 {exercise['name']}\n\n"
+            f"Выбери повторения:",
+            reply_markup=reps_kb()
+        )
+    else:
+        # Получаем последнюю тренировку для подсказки
+        last_workout = await db.get_last_workout(user_id, exercise_id)
+        hint = ""
+        if last_workout:
+            last = last_workout[0]
+            hint = f"\n\n💡 В прошлый раз: {last['weight']} кг × {last['reps']}"
 
-    await state.set_state(LogWorkout.waiting_for_weight)
+        await state.set_state(LogWorkout.waiting_for_weight)
+        await callback.message.answer(
+            f"💪 {exercise['name']}\n\n"
+            f"Выбери вес (кг) или введи свой:{hint}",
+            reply_markup=weight_kb(weight_type)
+        )
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    await callback.answer()
 
-    await callback.message.answer(
-        f"💪 {exercise['name']}\n\n"
-        f"Введи вес (кг):{hint}",
-        reply_markup=cancel_kb()
+
+# ==================== ВЕС ====================
+
+def format_weight(weight: float) -> str:
+    """Форматирует вес без .0 для целых чисел."""
+    return f"{int(weight)}" if weight == int(weight) else f"{weight}"
+
+
+@router.callback_query(LogWorkout.waiting_for_weight, F.data.startswith("w:"))
+async def quick_weight(callback: CallbackQuery, state: FSMContext):
+    """Быстрый выбор веса."""
+    weight = float(callback.data.split(":")[1])
+    await state.update_data(weight=weight)
+    await state.set_state(LogWorkout.waiting_for_reps)
+
+    data = await state.get_data()
+    await callback.message.edit_text(
+        f"💪 {data['exercise_name']} — {format_weight(weight)}кг\n\n"
+        f"Выбери повторения:",
+        reply_markup=reps_kb()
     )
     await callback.answer()
 
 
 @router.message(LogWorkout.waiting_for_weight)
 async def process_weight(message: Message, state: FSMContext):
-    """Обработка веса."""
+    """Обработка веса (ручной ввод)."""
+    data = await state.get_data()
+    weight_type = data.get("weight_type", 10)
+
     try:
-        # Поддержка запятой и точки
         weight_text = message.text.replace(",", ".")
         weight = float(weight_text)
         if weight < 0 or weight > 1000:
@@ -73,54 +119,94 @@ async def process_weight(message: Message, state: FSMContext):
     except (ValueError, TypeError):
         await message.answer(
             "Введи корректный вес (число от 0 до 1000):",
-            reply_markup=cancel_kb()
+            reply_markup=weight_kb(weight_type)
         )
         return
 
     await state.update_data(weight=weight)
     await state.set_state(LogWorkout.waiting_for_reps)
 
-    data = await state.get_data()
     await message.answer(
-        f"💪 {data['exercise_name']} — {weight} кг\n\n"
-        f"Введи повторы×подходы:\n"
-        f"Например: <code>15x3</code> или <code>12</code>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb()
+        f"💪 {data['exercise_name']} — {format_weight(weight)}кг\n\n"
+        f"Выбери повторения:",
+        reply_markup=reps_kb()
     )
+
+
+# ==================== ПОВТОРЕНИЯ ====================
+
+@router.callback_query(LogWorkout.waiting_for_reps, F.data.startswith("r:"))
+async def quick_reps(callback: CallbackQuery, state: FSMContext):
+    """Быстрый выбор повторений."""
+    reps = int(callback.data.split(":")[1])
+    await state.update_data(reps=reps)
+    await state.set_state(LogWorkout.waiting_for_sets)
+
+    data = await state.get_data()
+    await callback.message.edit_text(
+        f"💪 {data['exercise_name']} — {format_weight(data['weight'])}кг ×{reps}\n\n"
+        f"Сколько подходов?",
+        reply_markup=sets_kb()
+    )
+    await callback.answer()
 
 
 @router.message(LogWorkout.waiting_for_reps)
 async def process_reps(message: Message, state: FSMContext):
-    """Обработка повторений и подходов."""
-    text = message.text.strip().lower()
-
-    # Парсим формат: "15x3", "15х3", "15*3", "15-3", или просто "15"
-    match = re.match(r'^(\d+)\s*[xх×*\-]\s*(\d+)$', text)
-    if match:
-        reps = int(match.group(1))
-        sets = int(match.group(2))
-    else:
-        try:
-            reps = int(text)
-            sets = 1
-        except ValueError:
-            await message.answer(
-                "❌ Формат: <code>15x3</code> или <code>12</code>",
-                parse_mode="HTML",
-                reply_markup=cancel_kb()
-            )
-            return
-
-    if reps < 1 or reps > 1000 or sets < 1 or sets > 20:
+    """Обработка повторений (ручной ввод)."""
+    try:
+        reps = int(message.text.strip())
+        if reps < 1 or reps > 1000:
+            raise ValueError()
+    except (ValueError, TypeError):
         await message.answer(
-            "❌ Повторы 1-1000, подходы 1-20",
-            reply_markup=cancel_kb()
+            "Введи число повторений (1-1000):",
+            reply_markup=reps_kb()
         )
         return
 
+    await state.update_data(reps=reps)
+    await state.set_state(LogWorkout.waiting_for_sets)
+
     data = await state.get_data()
-    user_id = message.from_user.id
+    await message.answer(
+        f"💪 {data['exercise_name']} — {format_weight(data['weight'])}кг ×{reps}\n\n"
+        f"Сколько подходов?",
+        reply_markup=sets_kb()
+    )
+
+
+# ==================== ПОДХОДЫ ====================
+
+@router.callback_query(LogWorkout.waiting_for_sets, F.data.startswith("s:"))
+async def quick_sets(callback: CallbackQuery, state: FSMContext):
+    """Быстрый выбор подходов."""
+    sets = int(callback.data.split(":")[1])
+    await save_workout(callback.message, state, sets, is_callback=True)
+    await callback.answer()
+
+
+@router.message(LogWorkout.waiting_for_sets)
+async def process_sets(message: Message, state: FSMContext):
+    """Обработка подходов (ручной ввод)."""
+    try:
+        sets = int(message.text.strip())
+        if sets < 1 or sets > 20:
+            raise ValueError()
+    except (ValueError, TypeError):
+        await message.answer(
+            "Введи число подходов (1-20):",
+            reply_markup=sets_kb()
+        )
+        return
+
+    await save_workout(message, state, sets, is_callback=False)
+
+
+async def save_workout(message, state: FSMContext, sets: int, is_callback: bool):
+    """Сохранить тренировку."""
+    data = await state.get_data()
+    user_id = message.chat.id
 
     # Получаем текущее количество подходов
     from aiosqlite import connect
@@ -140,17 +226,26 @@ async def process_reps(message: Message, state: FSMContext):
             user_id=user_id,
             exercise_id=data["exercise_id"],
             weight=data["weight"],
-            reps=reps,
+            reps=data["reps"],
             set_num=set_num,
             date=data["date"]
         )
 
     await state.clear()
 
-    sets_text = f"× {sets} подходов" if sets > 1 else ""
-    await message.answer(
+    sets_text = f"×{sets}" if sets > 1 else ""
+    result_text = (
         f"✅ <b>{data['exercise_name']}</b>\n"
-        f"{data['weight']} кг × {reps} {sets_text}",
-        parse_mode="HTML",
-        reply_markup=back_to_exercise_kb(data["exercise_id"])
+        f"{format_weight(data['weight'])}кг {data['reps']}{sets_text}"
     )
+
+    kb = after_log_kb(
+        exercise_id=data["exercise_id"],
+        next_exercise_id=data.get("next_exercise_id"),
+        day_id=data.get("day_id")
+    )
+
+    if is_callback:
+        await message.edit_text(result_text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await message.answer(result_text, parse_mode="HTML", reply_markup=kb)

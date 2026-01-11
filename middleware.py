@@ -28,7 +28,7 @@ class AccessMiddleware(BaseMiddleware):
             state: FSMContext = data.get("state")
             if state:
                 current_state = await state.get_state()
-                if current_state and ("AccessState" in current_state or "CustomMode" in current_state or "LogWorkout" in current_state or "EditExerciseTag" in current_state):
+                if current_state and ("AccessState" in current_state or "CustomMode" in current_state or "LogWorkout" in current_state or "EditExerciseTag" in current_state or "GenerateExercises" in current_state):
                     return await handler(event, data)
 
         elif isinstance(event, CallbackQuery):

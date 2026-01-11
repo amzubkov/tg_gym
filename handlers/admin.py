@@ -44,6 +44,7 @@ class AddExercise(StatesGroup):
     waiting_for_name = State()
     waiting_for_description = State()
     waiting_for_tag = State()
+    waiting_for_weight_type = State()
     waiting_for_image = State()
 
 
@@ -389,11 +390,12 @@ async def process_exercise_description(message: Message, state: FSMContext):
 async def skip_exercise_tag(callback: CallbackQuery, state: FSMContext):
     """Пропустить тег."""
     await state.update_data(tag=None)
-    await state.set_state(AddExercise.waiting_for_image)
+    await state.set_state(AddExercise.waiting_for_weight_type)
 
+    from keyboards import weight_type_kb
     await callback.message.edit_text(
-        "Теперь отправь картинку упражнения (или нажми Пропустить):",
-        reply_markup=skip_kb("skip_ex_image")
+        "Выбери тип веса для упражнения:",
+        reply_markup=weight_type_kb()
     )
     await callback.answer()
 
@@ -403,13 +405,30 @@ async def process_exercise_tag(message: Message, state: FSMContext):
     """Обработка тега."""
     tag = message.text.strip().lower()
     await state.update_data(tag=tag)
-    await state.set_state(AddExercise.waiting_for_image)
+    await state.set_state(AddExercise.waiting_for_weight_type)
 
+    from keyboards import weight_type_kb
     await message.answer(
         f"Тег: #{tag}\n\n"
+        "Выбери тип веса для упражнения:",
+        reply_markup=weight_type_kb()
+    )
+
+
+@router.callback_query(AddExercise.waiting_for_weight_type, F.data.startswith("wt:"))
+async def process_weight_type(callback: CallbackQuery, state: FSMContext):
+    """Обработка типа веса."""
+    weight_type = int(callback.data.split(":")[1])
+    await state.update_data(weight_type=weight_type)
+    await state.set_state(AddExercise.waiting_for_image)
+
+    type_names = {0: "без веса", 10: "гантели", 100: "штанга"}
+    await callback.message.edit_text(
+        f"Тип веса: {type_names.get(weight_type, 'гантели')}\n\n"
         "Теперь отправь картинку упражнения (или нажми Пропустить):",
         reply_markup=skip_kb("skip_ex_image")
     )
+    await callback.answer()
 
 
 @router.callback_query(AddExercise.waiting_for_image, F.data == "skip_ex_image")
@@ -422,7 +441,8 @@ async def skip_exercise_image(callback: CallbackQuery, state: FSMContext):
         name=data["exercise_name"],
         description=data.get("description"),
         image_file_id=None,
-        tag=data.get("tag")
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
     )
 
     await state.clear()
@@ -448,7 +468,8 @@ async def process_exercise_image(message: Message, state: FSMContext):
         name=data["exercise_name"],
         description=data.get("description"),
         image_file_id=file_id,
-        tag=data.get("tag")
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
     )
 
     await state.clear()
@@ -885,7 +906,11 @@ async def edit_exercise_tag(callback: CallbackQuery, state: FSMContext):
     if tags:
         tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
 
-    current_tag = f"Текущий тег: #{exercise['tag']}" if exercise.get("tag") else "Тег не установлен"
+    if exercise.get("tag"):
+        tags = [t.strip() for t in exercise["tag"].split(",") if t.strip()]
+        current_tag = "Текущий тег: " + " ".join(f"#{t}" for t in tags)
+    else:
+        current_tag = "Тег не установлен"
 
     from aiogram.types import InlineKeyboardButton
     from aiogram.utils.keyboard import InlineKeyboardBuilder

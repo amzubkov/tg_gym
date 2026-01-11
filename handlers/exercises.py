@@ -155,11 +155,27 @@ async def show_exercise(callback: CallbackQuery):
 
     day = await db.get_day(exercise["day_id"])
 
+    # Находим следующее упражнение
+    next_exercise_id = None
+    if day:
+        exercises = await db.get_exercises_by_day(exercise["day_id"])
+        for i, ex in enumerate(exercises):
+            if ex["id"] == exercise_id and i + 1 < len(exercises):
+                next_exercise_id = exercises[i + 1]["id"]
+                break
+
     # Получаем последнюю тренировку
     user_id = callback.from_user.id
     last_workout = await db.get_last_workout(user_id, exercise_id)
 
     text = f"💪 {exercise['name']}\n"
+
+    # Показываем теги
+    if "tag" in exercise.keys() and exercise["tag"]:
+        tags = [t.strip() for t in exercise["tag"].split(",") if t.strip()]
+        if tags:
+            text += "🏷 " + " ".join(f"#{t}" for t in tags) + "\n"
+
     if exercise["description"]:
         text += f"\n{exercise['description']}\n"
 
@@ -169,7 +185,7 @@ async def show_exercise(callback: CallbackQuery):
             text += f"  Подход {log['set_num']}: {log['weight']} кг × {log['reps']} раз\n"
 
     is_admin = user_id == ADMIN_ID
-    kb = exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=is_admin)
+    kb = exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=is_admin, next_exercise_id=next_exercise_id)
 
     # Если есть картинка — отправляем фото
     if exercise["image_file_id"]:

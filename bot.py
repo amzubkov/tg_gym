@@ -15,6 +15,7 @@ from handlers import (
     history_router,
     admin_router,
     custom_router,
+    ai_router,
 )
 
 logging.basicConfig(
@@ -45,6 +46,7 @@ async def main():
     dp.include_router(history_router)
     dp.include_router(admin_router)
     dp.include_router(custom_router)
+    dp.include_router(ai_router)
 
     logger.info("Starting bot...")
 

@@ -119,10 +119,8 @@ async def start_custom_mode(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CustomMode.waiting_for_name)
 
     await callback.message.edit_text(
-        "✏️ Своё упражнение\n\n"
-        "Примеры:\n"
-        "<code>жим лежа 90кг 15х4</code>\n"
-        "<code>бег 50мин</code>",
+        "Напиши что сделал сегодня, например:\n"
+        "<code>жим лежа 90 15х4</code> или <code>бег 1 час</code>",
         parse_mode="HTML",
         reply_markup=custom_mode_kb(has_entries)
     )

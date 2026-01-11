@@ -124,6 +124,15 @@ async def show_my_stats(callback: CallbackQuery):
     yesterday_activity = await db.get_daily_activity(user_id, yesterday.isoformat())
 
     text = f"📊 Твоя статистика:\n\n"
+
+    # Прогресс по программе
+    if current_day:
+        completed = current_day["day_number"] - 1  # текущий день ещё не сделан
+        total = current_day["total_days"]
+        progress = "✅" * completed + "⬜" * (total - completed)
+        text += f"📋 {current_day['program_name']}\n"
+        text += f"{progress} ({completed}/{total})\n\n"
+
     text += f"В этом месяце: {stats['month_workouts']} тренировок\n"
     if stats['days_ago'] is not None:
         if stats['days_ago'] == 0:
@@ -250,34 +259,43 @@ async def complete_day(callback: CallbackQuery):
     activity = await db.get_daily_activity(user_id, today)
 
     # Формируем сводку
-    summary_lines = []
+    day_name = current_day["day_name"] or f"День {current_day['day_number']}"
+    header = f"{current_day['program_name']} - {day_name}"
 
-    # Упражнения из программы
+    summary_lines = [header, ""]
+
+    # Упражнения из программы - группируем по названию
     exercises = {}
     for w in activity["workouts"]:
         name = w["name"]
         if name not in exercises:
-            exercises[name] = []
-        exercises[name].append(f"{w['weight']}×{w['reps']}")
-
-    for name, sets in exercises.items():
-        summary_lines.append(f"• {name}: {', '.join(sets)}")
+            exercises[name] = {"weight": w["weight"], "reps": w["reps"], "sets": 0}
+        exercises[name]["sets"] += 1
 
     # Свои упражнения
-    custom = {}
     for c in activity["custom"]:
         name = c["name"]
-        if name not in custom:
-            custom[name] = []
         if c.get("duration_minutes"):
-            custom[name].append(f"{c['duration_minutes']}мин")
+            # Кардио
+            if name not in exercises:
+                exercises[name] = {"duration": 0}
+            exercises[name]["duration"] = exercises[name].get("duration", 0) + c["duration_minutes"]
         else:
-            custom[name].append(f"{c['weight']}×{c['reps']}")
+            # Силовое
+            if name not in exercises:
+                exercises[name] = {"weight": c["weight"], "reps": c["reps"], "sets": 0}
+            exercises[name]["sets"] += 1
 
-    for name, sets in custom.items():
-        summary_lines.append(f"• {name}: {', '.join(sets)}")
+    # Форматируем с номерами
+    for i, (name, data) in enumerate(exercises.items(), 1):
+        if "duration" in data:
+            summary_lines.append(f"{i}. {name}: {data['duration']}мин")
+        else:
+            summary_lines.append(f"{i}. {name}: {data['weight']}кг {data['reps']}×{data['sets']}")
 
-    summary = "\n".join(summary_lines) if summary_lines else "Нет записей"
+    summary = "\n".join(summary_lines) if len(summary_lines) > 2 else "Нет записей"
+    # Форматируем для копирования
+    copyable_summary = f"```\n{summary}\n```"
 
     # Завершаем день
     is_finished = await db.complete_day(user_id)
@@ -286,8 +304,9 @@ async def complete_day(callback: CallbackQuery):
         # Программа завершена
         await callback.message.edit_text(
             f"🎉 Программа «{current_day['program_name']}» завершена!\n\n"
-            f"📝 Итог дня:\n{summary}\n\n"
+            f"📝 Итог дня:\n{copyable_summary}\n\n"
             f"Ты прошёл все {current_day['total_days']} дней!",
+            parse_mode="Markdown",
             reply_markup=program_finished_kb()
         )
     else:
@@ -297,8 +316,9 @@ async def complete_day(callback: CallbackQuery):
 
         await callback.message.edit_text(
             f"✅ День завершён!\n\n"
-            f"📝 Итог:\n{summary}\n\n"
+            f"📝 Итог:\n{copyable_summary}\n\n"
             f"📅 Следующий: {day_name} ({new_day['day_number']}/{new_day['total_days']})",
+            parse_mode="Markdown",
             reply_markup=today_workout_kb(new_day["day_id"])
         )
 

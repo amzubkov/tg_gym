@@ -5,6 +5,7 @@ from handlers.tracking import router as tracking_router
 from handlers.history import router as history_router
 from handlers.admin import router as admin_router
 from handlers.custom import router as custom_router
+from handlers.ai_generate import router as ai_router
 
 __all__ = [
     "access_router",
@@ -14,4 +15,5 @@ __all__ = [
     "history_router",
     "admin_router",
     "custom_router",
+    "ai_router",
 ]

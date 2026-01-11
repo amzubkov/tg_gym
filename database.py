@@ -45,6 +45,12 @@ async def init_db():
         except Exception:
             pass  # Колонка уже существует
 
+        # Миграция: добавить weight_type (0=без веса, 10=гантели, 100=штанга)
+        try:
+            await db.execute("ALTER TABLE exercises ADD COLUMN weight_type INTEGER DEFAULT 10")
+        except Exception:
+            pass  # Колонка уже существует
+
         # Логи тренировок
         await db.execute("""
             CREATE TABLE IF NOT EXISTS workout_logs (
@@ -198,14 +204,18 @@ async def create_exercise(
     description: str = None,
     image_file_id: str = None,
     order_num: int = 0,
-    tag: str = None
+    tag: str = None,
+    weight_type: int = 10
 ) -> int:
-    """Создать упражнение."""
+    """Создать упражнение.
+
+    weight_type: 0=без веса, 10=гантели, 100=штанга
+    """
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
-            """INSERT INTO exercises (day_id, name, description, image_file_id, order_num, tag)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (day_id, name, description, image_file_id, order_num, tag.lower() if tag else None)
+            """INSERT INTO exercises (day_id, name, description, image_file_id, order_num, tag, weight_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (day_id, name, description, image_file_id, order_num, tag.lower() if tag else None, weight_type)
         )
         await db.commit()
         return cursor.lastrowid
@@ -653,31 +663,47 @@ async def get_all_allowed_users() -> list:
 # ==================== TAGS ====================
 
 async def get_all_tags() -> list:
-    """Получить все уникальные теги из упражнений."""
+    """Получить все уникальные теги из упражнений.
+
+    Теги могут храниться через запятую, поэтому разбираем их.
+    """
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
-            """SELECT tag, COUNT(*) as exercise_count
-               FROM exercises
-               WHERE tag IS NOT NULL AND tag != ''
-               GROUP BY tag
-               ORDER BY tag"""
+            """SELECT tag FROM exercises WHERE tag IS NOT NULL AND tag != ''"""
         )
         rows = await cursor.fetchall()
-        return [{"name": row[0], "exercise_count": row[1]} for row in rows]
+
+    # Разбираем теги через запятую и считаем
+    tag_counts = {}
+    for row in rows:
+        tags = [t.strip().lower() for t in row[0].split(",") if t.strip()]
+        for tag in tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    return [{"name": name, "exercise_count": count}
+            for name, count in sorted(tag_counts.items())]
 
 
 async def get_exercises_by_tag(tag: str) -> list:
-    """Получить все упражнения с данным тегом (из всех программ)."""
+    """Получить все упражнения с данным тегом (из всех программ).
+
+    Ищет тег в списке тегов, разделённых запятыми.
+    """
+    tag = tag.strip().lower()
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
+        # Ищем: точное совпадение, или в начале с запятой, или в конце с запятой, или в середине
         cursor = await db.execute(
             """SELECT e.*, d.name as day_name, d.day_number, p.name as program_name
                FROM exercises e
                JOIN days d ON e.day_id = d.id
                JOIN programs p ON d.program_id = p.id
-               WHERE LOWER(e.tag) = LOWER(?)
+               WHERE LOWER(e.tag) = ?
+                  OR LOWER(e.tag) LIKE ?
+                  OR LOWER(e.tag) LIKE ?
+                  OR LOWER(e.tag) LIKE ?
                ORDER BY p.name, d.day_number, e.order_num""",
-            (tag,)
+            (tag, f"{tag},%", f"%, {tag}", f"%, {tag},%")
         )
         return await cursor.fetchall()
 
