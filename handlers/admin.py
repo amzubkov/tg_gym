@@ -7,7 +7,10 @@ from aiogram.filters import BaseFilter
 from config import ADMIN_ID
 from keyboards import (
     admin_panel_kb, cancel_kb, skip_kb,
-    programs_kb, days_kb, admin_menu_kb
+    programs_kb, days_kb, admin_menu_kb,
+    exercise_library_kb, lib_exercise_detail_kb,
+    select_day_for_exercise_kb, add_exercise_to_day_kb,
+    library_exercises_for_day_kb
 )
 import database as db
 
@@ -36,11 +39,18 @@ class AddDay(StatesGroup):
     waiting_for_program = State()
     waiting_for_number = State()
     waiting_for_name = State()
+    waiting_for_description = State()
 
 
 class AddExercise(StatesGroup):
+    """Добавление упражнения из библиотеки в день."""
     waiting_for_program = State()
     waiting_for_day = State()
+    waiting_for_source = State()  # из библиотеки или новое
+
+
+class CreateExercise(StatesGroup):
+    """Создание нового упражнения в библиотеке."""
     waiting_for_name = State()
     waiting_for_description = State()
     waiting_for_tag = State()
@@ -58,6 +68,376 @@ async def admin_menu(callback: CallbackQuery):
         "Здесь можно добавлять программы, дни и упражнения.",
         reply_markup=admin_panel_kb()
     )
+    await callback.answer()
+
+
+# ==================== EXERCISE LIBRARY ====================
+
+@router.callback_query(F.data == "exercise_library")
+async def show_exercise_library(callback: CallbackQuery):
+    """Показать библиотеку упражнений."""
+    exercises = await db.get_all_exercises()
+
+    text = "📚 Библиотека упражнений\n\n"
+    if exercises:
+        text += f"Всего упражнений: {len(exercises)}"
+    else:
+        text += "Пока нет упражнений. Создай первое!"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=exercise_library_kb(exercises)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("lib_exercise:"))
+async def show_library_exercise(callback: CallbackQuery):
+    """Показать детали упражнения в библиотеке."""
+    exercise_id = int(callback.data.split(":")[1])
+    exercise = await db.get_exercise(exercise_id)
+
+    if not exercise:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    # Получаем дни, в которых используется
+    exercise_days = await db.get_exercise_days(exercise_id)
+
+    text = f"📚 {exercise['name']}\n\n"
+
+    if "tag" in exercise.keys() and exercise["tag"]:
+        tags = [t.strip() for t in exercise["tag"].split(",") if t.strip()]
+        text += "🏷 " + " ".join(f"#{t}" for t in tags) + "\n"
+
+    if "description" in exercise.keys() and exercise["description"]:
+        text += f"\n{exercise['description']}\n"
+
+    weight_types = {0: "без веса", 10: "гантели", 100: "штанга"}
+    weight_type = exercise["weight_type"] if "weight_type" in exercise.keys() else 10
+    text += f"\n⚖️ Тип веса: {weight_types.get(weight_type, 'гантели')}\n"
+
+    if exercise_days:
+        text += "\n📋 Используется в днях:\n"
+        for d in exercise_days:
+            day_name = d["name"] or f"День {d['day_number']}"
+            text += f"  • {d['program_name']} / {day_name}\n"
+    else:
+        text += "\n⚠️ Не добавлено ни в один день"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=lib_exercise_detail_kb(exercise_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "create_exercise")
+async def start_create_exercise(callback: CallbackQuery, state: FSMContext):
+    """Начать создание упражнения в библиотеке."""
+    await state.set_state(CreateExercise.waiting_for_name)
+
+    await callback.message.edit_text(
+        "➕ Создание упражнения\n\n"
+        "Введи название упражнения:",
+        reply_markup=cancel_kb()
+    )
+    await callback.answer()
+
+
+@router.message(CreateExercise.waiting_for_name)
+async def process_lib_exercise_name(message: Message, state: FSMContext):
+    """Обработка названия упражнения."""
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer(
+            "Название слишком короткое. Минимум 2 символа:",
+            reply_markup=cancel_kb()
+        )
+        return
+
+    await state.update_data(exercise_name=name)
+    await state.set_state(CreateExercise.waiting_for_description)
+
+    await message.answer(
+        f"Упражнение: {name}\n\n"
+        "Введи описание (или нажми Пропустить):\n"
+        "Например: 3×12, техника, подсказки",
+        reply_markup=skip_kb("skip_lib_desc")
+    )
+
+
+@router.callback_query(CreateExercise.waiting_for_description, F.data == "skip_lib_desc")
+async def skip_lib_description(callback: CallbackQuery, state: FSMContext):
+    """Пропустить описание."""
+    await state.update_data(description=None)
+    await state.set_state(CreateExercise.waiting_for_tag)
+
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
+
+    await callback.message.edit_text(
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=skip_kb("skip_lib_tag")
+    )
+    await callback.answer()
+
+
+@router.message(CreateExercise.waiting_for_description)
+async def process_lib_description(message: Message, state: FSMContext):
+    """Обработка описания."""
+    description = message.text.strip()
+    await state.update_data(description=description)
+    await state.set_state(CreateExercise.waiting_for_tag)
+
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
+
+    await message.answer(
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=skip_kb("skip_lib_tag")
+    )
+
+
+@router.callback_query(CreateExercise.waiting_for_tag, F.data == "skip_lib_tag")
+async def skip_lib_tag(callback: CallbackQuery, state: FSMContext):
+    """Пропустить тег."""
+    await state.update_data(tag=None)
+    await state.set_state(CreateExercise.waiting_for_weight_type)
+
+    from keyboards import weight_type_kb
+    await callback.message.edit_text(
+        "Выбери тип веса для упражнения:",
+        reply_markup=weight_type_kb()
+    )
+    await callback.answer()
+
+
+@router.message(CreateExercise.waiting_for_tag)
+async def process_lib_tag(message: Message, state: FSMContext):
+    """Обработка тега."""
+    tag = message.text.strip().lower()
+    await state.update_data(tag=tag)
+    await state.set_state(CreateExercise.waiting_for_weight_type)
+
+    from keyboards import weight_type_kb
+    await message.answer(
+        f"Тег: #{tag}\n\n"
+        "Выбери тип веса для упражнения:",
+        reply_markup=weight_type_kb()
+    )
+
+
+@router.callback_query(CreateExercise.waiting_for_weight_type, F.data.startswith("wt:"))
+async def process_lib_weight_type(callback: CallbackQuery, state: FSMContext):
+    """Обработка типа веса."""
+    weight_type = int(callback.data.split(":")[1])
+    await state.update_data(weight_type=weight_type)
+    await state.set_state(CreateExercise.waiting_for_image)
+
+    type_names = {0: "без веса", 10: "гантели", 100: "штанга"}
+    await callback.message.edit_text(
+        f"Тип веса: {type_names.get(weight_type, 'гантели')}\n\n"
+        "Теперь отправь картинку упражнения (или нажми Пропустить):",
+        reply_markup=skip_kb("skip_lib_image")
+    )
+    await callback.answer()
+
+
+@router.callback_query(CreateExercise.waiting_for_image, F.data == "skip_lib_image")
+async def skip_lib_image(callback: CallbackQuery, state: FSMContext):
+    """Пропустить картинку и сохранить упражнение."""
+    data = await state.get_data()
+
+    exercise_id = await db.create_exercise(
+        name=data["exercise_name"],
+        description=data.get("description"),
+        image_file_id=None,
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
+    )
+
+    # Если пришли из добавления в день - добавляем связь
+    day_id = data.get("target_day_id")
+    if day_id:
+        await db.add_exercise_to_day(exercise_id, day_id)
+        day = await db.get_day(day_id)
+        day_name = day["name"] or f"День {day['day_number']}"
+        await state.clear()
+        await callback.message.edit_text(
+            f"✅ Упражнение «{data['exercise_name']}» создано и добавлено в {day_name}!",
+            reply_markup=admin_panel_kb()
+        )
+    else:
+        await state.clear()
+        tag_text = f" (#{data['tag']})" if data.get("tag") else ""
+        await callback.message.edit_text(
+            f"✅ Упражнение «{data['exercise_name']}»{tag_text} создано в библиотеке!",
+            reply_markup=exercise_library_kb(await db.get_all_exercises())
+        )
+    await callback.answer()
+
+
+@router.message(CreateExercise.waiting_for_image, F.photo)
+async def process_lib_image(message: Message, state: FSMContext):
+    """Обработка картинки."""
+    data = await state.get_data()
+
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    exercise_id = await db.create_exercise(
+        name=data["exercise_name"],
+        description=data.get("description"),
+        image_file_id=file_id,
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
+    )
+
+    # Если пришли из добавления в день - добавляем связь
+    day_id = data.get("target_day_id")
+    if day_id:
+        await db.add_exercise_to_day(exercise_id, day_id)
+        day = await db.get_day(day_id)
+        day_name = day["name"] or f"День {day['day_number']}"
+        await state.clear()
+        await message.answer(
+            f"✅ Упражнение «{data['exercise_name']}» создано и добавлено в {day_name}!",
+            reply_markup=admin_panel_kb()
+        )
+    else:
+        await state.clear()
+        tag_text = f" (#{data['tag']})" if data.get("tag") else ""
+        await message.answer(
+            f"✅ Упражнение «{data['exercise_name']}»{tag_text} создано в библиотеке!",
+            reply_markup=exercise_library_kb(await db.get_all_exercises())
+        )
+
+
+@router.message(CreateExercise.waiting_for_image)
+async def wrong_lib_image_format(message: Message, state: FSMContext):
+    """Неправильный формат — ожидаем фото."""
+    await message.answer(
+        "Отправь картинку как фото, или нажми Пропустить:",
+        reply_markup=skip_kb("skip_lib_image")
+    )
+
+
+@router.callback_query(F.data.startswith("add_to_day:"))
+async def add_exercise_to_day_menu(callback: CallbackQuery):
+    """Выбрать день для добавления упражнения."""
+    exercise_id = int(callback.data.split(":")[1])
+    exercise = await db.get_exercise(exercise_id)
+
+    if not exercise:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    programs = await db.get_all_programs()
+    if not programs:
+        await callback.answer("Сначала создай программу!", show_alert=True)
+        return
+
+    # Собираем дни по программам
+    days_by_program = {}
+    for p in programs:
+        days = await db.get_days_by_program(p['id'])
+        if days:
+            days_by_program[p['id']] = days
+
+    if not days_by_program:
+        await callback.answer("Нет дней в программах!", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"📋 Добавить «{exercise['name']}» в день:\n\nВыбери программу и день:",
+        reply_markup=select_day_for_exercise_kb(programs, days_by_program, exercise_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("link_exercise:"))
+async def link_exercise_to_day(callback: CallbackQuery):
+    """Связать упражнение с днём."""
+    parts = callback.data.split(":")
+    exercise_id = int(parts[1])
+    day_id = int(parts[2])
+
+    exercise = await db.get_exercise(exercise_id)
+    day = await db.get_day(day_id)
+
+    if not exercise or not day:
+        await callback.answer("Упражнение или день не найдены", show_alert=True)
+        return
+
+    # Добавляем связь
+    await db.add_exercise_to_day(exercise_id, day_id)
+
+    day_name = day["name"] or f"День {day['day_number']}"
+    await callback.message.edit_text(
+        f"✅ «{exercise['name']}» добавлено в {day_name}!",
+        reply_markup=admin_panel_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("delete_lib_exercise:"))
+async def confirm_delete_lib_exercise(callback: CallbackQuery):
+    """Подтверждение удаления упражнения из библиотеки."""
+    exercise_id = int(callback.data.split(":")[1])
+    exercise = await db.get_exercise(exercise_id)
+
+    if not exercise:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    exercise_days = await db.get_exercise_days(exercise_id)
+
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"do_del_lib_ex:{exercise_id}"),
+        InlineKeyboardButton(text="❌ Нет", callback_data=f"lib_exercise:{exercise_id}")
+    )
+
+    warning = ""
+    if exercise_days:
+        warning = f"\n\n⚠️ Упражнение используется в {len(exercise_days)} днях!"
+
+    await callback.message.edit_text(
+        f"🗑 Удалить «{exercise['name']}» из библиотеки?{warning}\n\n"
+        "Это также удалит всю историю тренировок по этому упражнению!",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("do_del_lib_ex:"))
+async def do_delete_lib_exercise(callback: CallbackQuery):
+    """Удалить упражнение из библиотеки."""
+    exercise_id = int(callback.data.split(":")[1])
+    exercise = await db.get_exercise(exercise_id)
+
+    if exercise:
+        await db.delete_exercise(exercise_id)
+        await callback.message.edit_text(
+            f"✅ Упражнение «{exercise['name']}» удалено из библиотеки!",
+            reply_markup=exercise_library_kb(await db.get_all_exercises())
+        )
+    else:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+
     await callback.answer()
 
 
@@ -187,37 +567,80 @@ async def process_day_number(message: Message, state: FSMContext):
 @router.callback_query(AddDay.waiting_for_name, F.data == "skip_day_name")
 async def skip_day_name(callback: CallbackQuery, state: FSMContext):
     """Пропустить название дня."""
+    await state.update_data(day_name=None)
+    await state.set_state(AddDay.waiting_for_description)
+
     data = await state.get_data()
-
-    await db.create_day(
-        program_id=data["program_id"],
-        day_number=data["day_number"],
-        name=None
-    )
-
-    await state.clear()
     await callback.message.edit_text(
-        f"✅ День {data['day_number']} добавлен в «{data['program_name']}»!",
-        reply_markup=admin_panel_kb()
+        f"День {data['day_number']}\n\n"
+        "Введи описание дня (или нажми Пропустить):\n"
+        "Например: Фокус на грудь, лёгкая кардио разминка",
+        reply_markup=skip_kb("skip_day_desc")
     )
     await callback.answer()
 
 
 @router.message(AddDay.waiting_for_name)
 async def process_day_name(message: Message, state: FSMContext):
-    """Сохранить день с названием."""
-    data = await state.get_data()
+    """Сохранить название дня и перейти к описанию."""
     name = message.text.strip()
+    await state.update_data(day_name=name)
+    await state.set_state(AddDay.waiting_for_description)
+
+    data = await state.get_data()
+    await message.answer(
+        f"День {data['day_number']} — {name}\n\n"
+        "Введи описание дня (или нажми Пропустить):\n"
+        "Например: Фокус на грудь, лёгкая кардио разминка",
+        reply_markup=skip_kb("skip_day_desc")
+    )
+
+
+@router.callback_query(AddDay.waiting_for_description, F.data == "skip_day_desc")
+async def skip_day_description(callback: CallbackQuery, state: FSMContext):
+    """Пропустить описание и сохранить день."""
+    data = await state.get_data()
 
     try:
         await db.create_day(
             program_id=data["program_id"],
             day_number=data["day_number"],
-            name=name
+            name=data.get("day_name"),
+            description=None
         )
         await state.clear()
+
+        name_text = f" ({data['day_name']})" if data.get("day_name") else ""
+        await callback.message.edit_text(
+            f"✅ День {data['day_number']}{name_text} добавлен в «{data['program_name']}»!",
+            reply_markup=admin_panel_kb()
+        )
+    except Exception:
+        await callback.message.edit_text(
+            "Ошибка: такой день уже существует.",
+            reply_markup=cancel_kb()
+        )
+    await callback.answer()
+
+
+@router.message(AddDay.waiting_for_description)
+async def process_day_description(message: Message, state: FSMContext):
+    """Сохранить день с описанием."""
+    data = await state.get_data()
+    description = message.text.strip()
+
+    try:
+        await db.create_day(
+            program_id=data["program_id"],
+            day_number=data["day_number"],
+            name=data.get("day_name"),
+            description=description
+        )
+        await state.clear()
+
+        name_text = f" ({data['day_name']})" if data.get("day_name") else ""
         await message.answer(
-            f"✅ День {data['day_number']} ({name}) добавлен в «{data['program_name']}»!",
+            f"✅ День {data['day_number']}{name_text} добавлен в «{data['program_name']}»!",
             reply_markup=admin_panel_kb()
         )
     except Exception:
@@ -299,194 +722,70 @@ async def select_program_for_exercise(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(AddExercise.waiting_for_day, F.data.startswith("select_day_ex:"))
 async def select_day_for_exercise(callback: CallbackQuery, state: FSMContext):
-    """Выбор дня для упражнения."""
+    """Выбор дня для упражнения - показать выбор источника."""
     day_id = int(callback.data.split(":")[1])
     day = await db.get_day(day_id)
     day_name = day["name"] if day["name"] else f"День {day['day_number']}"
 
-    await state.update_data(day_id=day_id, day_name=day_name)
-    await state.set_state(AddExercise.waiting_for_name)
+    await state.update_data(day_id=day_id, day_name=day_name, target_day_id=day_id)
+    await state.set_state(AddExercise.waiting_for_source)
 
     # Показываем существующие упражнения
-    exercises = await db.get_exercises_by_day(day_id)
+    day_exercises = await db.get_exercises_by_day(day_id)
     existing = ""
-    if exercises:
-        existing = "\n\nУже есть:\n" + "\n".join(f"• {ex['name']}" for ex in exercises)
+    if day_exercises:
+        existing = "\n\nУже есть:\n" + "\n".join(f"• {ex['name']}" for ex in day_exercises)
 
     await callback.message.edit_text(
-        f"➕ Упражнение в {day_name}{existing}\n\n"
+        f"➕ Добавить упражнение в {day_name}{existing}\n\n"
+        "Выбери способ:",
+        reply_markup=add_exercise_to_day_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(AddExercise.waiting_for_source, F.data == "from_library")
+async def add_from_library(callback: CallbackQuery, state: FSMContext):
+    """Показать список упражнений из библиотеки."""
+    data = await state.get_data()
+    day_id = data["day_id"]
+
+    # Все упражнения библиотеки
+    all_exercises = await db.get_all_exercises()
+
+    # Уже добавленные в день
+    day_exercises = await db.get_exercises_by_day(day_id)
+    day_exercise_ids = {ex["id"] for ex in day_exercises}
+
+    # Фильтруем — только те, что ещё не добавлены
+    available = [ex for ex in all_exercises if ex["id"] not in day_exercise_ids]
+
+    if not available:
+        await callback.answer("Все упражнения уже добавлены в этот день!", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.message.edit_text(
+        f"📚 Выбери упражнение для добавления в {data['day_name']}:",
+        reply_markup=library_exercises_for_day_kb(available, day_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(AddExercise.waiting_for_source, F.data == "create_new_exercise")
+async def create_new_for_day(callback: CallbackQuery, state: FSMContext):
+    """Создать новое упражнение для дня."""
+    data = await state.get_data()
+    # Сохраняем target_day_id и переходим к созданию
+    await state.update_data(target_day_id=data["day_id"])
+    await state.set_state(CreateExercise.waiting_for_name)
+
+    await callback.message.edit_text(
+        f"➕ Создание упражнения для {data['day_name']}\n\n"
         "Введи название упражнения:",
         reply_markup=cancel_kb()
     )
     await callback.answer()
-
-
-@router.message(AddExercise.waiting_for_name)
-async def process_exercise_name(message: Message, state: FSMContext):
-    """Обработка названия упражнения."""
-    name = message.text.strip()
-
-    if len(name) < 2:
-        await message.answer(
-            "Название слишком короткое:",
-            reply_markup=cancel_kb()
-        )
-        return
-
-    await state.update_data(exercise_name=name)
-    await state.set_state(AddExercise.waiting_for_description)
-
-    await message.answer(
-        f"Упражнение: {name}\n\n"
-        "Введи описание (или нажми Пропустить):\n"
-        "Например: 3×12, техника, подсказки",
-        reply_markup=skip_kb("skip_ex_desc")
-    )
-
-
-@router.callback_query(AddExercise.waiting_for_description, F.data == "skip_ex_desc")
-async def skip_exercise_description(callback: CallbackQuery, state: FSMContext):
-    """Пропустить описание."""
-    await state.update_data(description=None)
-    await state.set_state(AddExercise.waiting_for_tag)
-
-    # Показываем существующие теги
-    tags = await db.get_all_tags()
-    tags_hint = ""
-    if tags:
-        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
-
-    await callback.message.edit_text(
-        f"Введи тег (группа мышц){tags_hint}\n\n"
-        "Например: бицепс, грудь, ноги\n"
-        "(или нажми Пропустить)",
-        reply_markup=skip_kb("skip_ex_tag")
-    )
-    await callback.answer()
-
-
-@router.message(AddExercise.waiting_for_description)
-async def process_exercise_description(message: Message, state: FSMContext):
-    """Обработка описания."""
-    description = message.text.strip()
-    await state.update_data(description=description)
-    await state.set_state(AddExercise.waiting_for_tag)
-
-    # Показываем существующие теги
-    tags = await db.get_all_tags()
-    tags_hint = ""
-    if tags:
-        tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
-
-    await message.answer(
-        f"Введи тег (группа мышц){tags_hint}\n\n"
-        "Например: бицепс, грудь, ноги\n"
-        "(или нажми Пропустить)",
-        reply_markup=skip_kb("skip_ex_tag")
-    )
-
-
-@router.callback_query(AddExercise.waiting_for_tag, F.data == "skip_ex_tag")
-async def skip_exercise_tag(callback: CallbackQuery, state: FSMContext):
-    """Пропустить тег."""
-    await state.update_data(tag=None)
-    await state.set_state(AddExercise.waiting_for_weight_type)
-
-    from keyboards import weight_type_kb
-    await callback.message.edit_text(
-        "Выбери тип веса для упражнения:",
-        reply_markup=weight_type_kb()
-    )
-    await callback.answer()
-
-
-@router.message(AddExercise.waiting_for_tag)
-async def process_exercise_tag(message: Message, state: FSMContext):
-    """Обработка тега."""
-    tag = message.text.strip().lower()
-    await state.update_data(tag=tag)
-    await state.set_state(AddExercise.waiting_for_weight_type)
-
-    from keyboards import weight_type_kb
-    await message.answer(
-        f"Тег: #{tag}\n\n"
-        "Выбери тип веса для упражнения:",
-        reply_markup=weight_type_kb()
-    )
-
-
-@router.callback_query(AddExercise.waiting_for_weight_type, F.data.startswith("wt:"))
-async def process_weight_type(callback: CallbackQuery, state: FSMContext):
-    """Обработка типа веса."""
-    weight_type = int(callback.data.split(":")[1])
-    await state.update_data(weight_type=weight_type)
-    await state.set_state(AddExercise.waiting_for_image)
-
-    type_names = {0: "без веса", 10: "гантели", 100: "штанга"}
-    await callback.message.edit_text(
-        f"Тип веса: {type_names.get(weight_type, 'гантели')}\n\n"
-        "Теперь отправь картинку упражнения (или нажми Пропустить):",
-        reply_markup=skip_kb("skip_ex_image")
-    )
-    await callback.answer()
-
-
-@router.callback_query(AddExercise.waiting_for_image, F.data == "skip_ex_image")
-async def skip_exercise_image(callback: CallbackQuery, state: FSMContext):
-    """Пропустить картинку и сохранить упражнение."""
-    data = await state.get_data()
-
-    await db.create_exercise(
-        day_id=data["day_id"],
-        name=data["exercise_name"],
-        description=data.get("description"),
-        image_file_id=None,
-        tag=data.get("tag"),
-        weight_type=data.get("weight_type", 10)
-    )
-
-    await state.clear()
-    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
-    await callback.message.edit_text(
-        f"✅ Упражнение «{data['exercise_name']}»{tag_text} добавлено в {data['day_name']}!",
-        reply_markup=admin_panel_kb()
-    )
-    await callback.answer()
-
-
-@router.message(AddExercise.waiting_for_image, F.photo)
-async def process_exercise_image(message: Message, state: FSMContext):
-    """Обработка картинки."""
-    data = await state.get_data()
-
-    # Берём самое большое фото
-    photo = message.photo[-1]
-    file_id = photo.file_id
-
-    await db.create_exercise(
-        day_id=data["day_id"],
-        name=data["exercise_name"],
-        description=data.get("description"),
-        image_file_id=file_id,
-        tag=data.get("tag"),
-        weight_type=data.get("weight_type", 10)
-    )
-
-    await state.clear()
-    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
-    await message.answer(
-        f"✅ Упражнение «{data['exercise_name']}»{tag_text} добавлено в {data['day_name']}!",
-        reply_markup=admin_panel_kb()
-    )
-
-
-@router.message(AddExercise.waiting_for_image)
-async def wrong_image_format(message: Message, state: FSMContext):
-    """Неправильный формат — ожидаем фото."""
-    await message.answer(
-        "Отправь картинку как фото, или нажми Пропустить:",
-        reply_markup=skip_kb("skip_ex_image")
-    )
 
 
 # ==================== DELETE MENU ====================
@@ -898,6 +1197,10 @@ async def edit_exercise_tag(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Упражнение не найдено", show_alert=True)
         return
 
+    # Находим первый день для кнопки "назад"
+    exercise_days = await db.get_exercise_days(exercise_id)
+    day_id = exercise_days[0]["id"] if exercise_days else 0
+
     await state.update_data(exercise_id=exercise_id)
     await state.set_state(EditExerciseTag.waiting_for_tag)
 
@@ -906,9 +1209,10 @@ async def edit_exercise_tag(callback: CallbackQuery, state: FSMContext):
     if tags:
         tags_hint = "\n\nИспользуемые теги: " + ", ".join(t["name"] for t in tags)
 
-    if exercise.get("tag"):
-        tags = [t.strip() for t in exercise["tag"].split(",") if t.strip()]
-        current_tag = "Текущий тег: " + " ".join(f"#{t}" for t in tags)
+    has_tag = "tag" in exercise.keys() and exercise["tag"]
+    if has_tag:
+        tag_list = [t.strip() for t in exercise["tag"].split(",") if t.strip()]
+        current_tag = "Текущий тег: " + " ".join(f"#{t}" for t in tag_list)
     else:
         current_tag = "Тег не установлен"
 
@@ -916,12 +1220,12 @@ async def edit_exercise_tag(callback: CallbackQuery, state: FSMContext):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 
     builder = InlineKeyboardBuilder()
-    if exercise.get("tag"):
+    if has_tag:
         builder.row(
             InlineKeyboardButton(text="🗑 Убрать тег", callback_data=f"remove_tag:{exercise_id}")
         )
     builder.row(
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"exercise:{exercise_id}")
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"exercise:{exercise_id}:{day_id}")
     )
 
     await callback.message.edit_text(
@@ -945,10 +1249,14 @@ async def process_edit_tag(message: Message, state: FSMContext):
 
     exercise = await db.get_exercise(exercise_id)
 
+    # Находим первый день, если есть
+    exercise_days = await db.get_exercise_days(exercise_id)
+    day_id = exercise_days[0]["id"] if exercise_days else 0
+
     from keyboards import exercise_detail_kb
     await message.answer(
         f"✅ Тег для «{exercise['name']}» изменён на #{new_tag}",
-        reply_markup=exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=True)
+        reply_markup=exercise_detail_kb(exercise_id, day_id, is_admin=True)
     )
 
 
@@ -962,9 +1270,13 @@ async def remove_exercise_tag(callback: CallbackQuery, state: FSMContext):
 
     exercise = await db.get_exercise(exercise_id)
 
+    # Находим первый день, если есть
+    exercise_days = await db.get_exercise_days(exercise_id)
+    day_id = exercise_days[0]["id"] if exercise_days else 0
+
     from keyboards import exercise_detail_kb
     await callback.message.edit_text(
         f"✅ Тег для «{exercise['name']}» удалён",
-        reply_markup=exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=True)
+        reply_markup=exercise_detail_kb(exercise_id, day_id, is_admin=True)
     )
     await callback.answer()

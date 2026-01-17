@@ -1,5 +1,36 @@
 import aiosqlite
 from config import DATABASE_PATH
+from contextlib import asynccontextmanager
+
+# Connection pool - единственное соединение для всего приложения
+_connection: aiosqlite.Connection | None = None
+
+
+async def get_connection() -> aiosqlite.Connection:
+    """Получить соединение с БД (singleton)."""
+    global _connection
+    if _connection is None:
+        _connection = await aiosqlite.connect(DATABASE_PATH)
+        _connection.row_factory = aiosqlite.Row
+    return _connection
+
+
+async def close_connection():
+    """Закрыть соединение с БД."""
+    global _connection
+    if _connection is not None:
+        await _connection.close()
+        _connection = None
+
+
+@asynccontextmanager
+async def get_db():
+    """Контекстный менеджер для работы с БД."""
+    conn = await get_connection()
+    try:
+        yield conn
+    finally:
+        await conn.commit()
 
 
 async def init_db():
@@ -39,6 +70,12 @@ async def init_db():
             )
         """)
 
+        # Миграция: добавить description к дням
+        try:
+            await db.execute("ALTER TABLE days ADD COLUMN description TEXT")
+        except Exception:
+            pass  # Колонка уже существует
+
         # Миграция: добавить tag если нет
         try:
             await db.execute("ALTER TABLE exercises ADD COLUMN tag TEXT")
@@ -50,6 +87,68 @@ async def init_db():
             await db.execute("ALTER TABLE exercises ADD COLUMN weight_type INTEGER DEFAULT 10")
         except Exception:
             pass  # Колонка уже существует
+
+        # Связь упражнений с днями (many-to-many)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS day_exercises (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day_id INTEGER NOT NULL,
+                exercise_id INTEGER NOT NULL,
+                order_num INTEGER DEFAULT 0,
+                FOREIGN KEY (day_id) REFERENCES days(id) ON DELETE CASCADE,
+                FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE,
+                UNIQUE(day_id, exercise_id)
+            )
+        """)
+
+        # Миграция: перенести существующие связи из exercises.day_id в day_exercises
+        cursor = await db.execute("SELECT COUNT(*) FROM day_exercises")
+        count = (await cursor.fetchone())[0]
+        if count == 0:
+            # Таблица пустая - мигрируем данные из старой схемы
+            await db.execute("""
+                INSERT OR IGNORE INTO day_exercises (day_id, exercise_id, order_num)
+                SELECT day_id, id, order_num FROM exercises WHERE day_id IS NOT NULL
+            """)
+
+        # Индекс для day_exercises
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_day_exercises_day
+            ON day_exercises(day_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_day_exercises_exercise
+            ON day_exercises(exercise_id)
+        """)
+
+        # Миграция: убрать NOT NULL с day_id в exercises (SQLite требует пересоздания таблицы)
+        cursor = await db.execute("PRAGMA table_info(exercises)")
+        columns = await cursor.fetchall()
+        day_id_col = next((c for c in columns if c[1] == "day_id"), None)
+        if day_id_col and day_id_col[2] == "INTEGER" and day_id_col[3] == 1:  # notnull=1
+            # Пересоздаём таблицу без NOT NULL на day_id
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS exercises_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day_id INTEGER,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    image_file_id TEXT,
+                    order_num INTEGER DEFAULT 0,
+                    tag TEXT,
+                    weight_type INTEGER DEFAULT 10,
+                    FOREIGN KEY (day_id) REFERENCES days(id) ON DELETE SET NULL
+                )
+            """)
+            await db.execute("""
+                INSERT INTO exercises_new (id, day_id, name, description, image_file_id, order_num, tag, weight_type)
+                SELECT id, day_id, name, description, image_file_id, order_num, tag, weight_type FROM exercises
+            """)
+            await db.execute("DROP TABLE exercises")
+            await db.execute("ALTER TABLE exercises_new RENAME TO exercises")
+            # Пересоздаём индексы
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_exercises_day ON exercises(day_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_exercises_tag ON exercises(tag)")
 
         # Логи тренировок
         await db.execute("""
@@ -109,39 +208,60 @@ async def init_db():
             )
         """)
 
+        # Индексы для ускорения частых запросов
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_workout_logs_user_date
+            ON workout_logs(user_id, date)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_workout_logs_user_exercise
+            ON workout_logs(user_id, exercise_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_custom_logs_user_date
+            ON custom_logs(user_id, date)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_custom_logs_user_name
+            ON custom_logs(user_id, name)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_exercises_day
+            ON exercises(day_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_exercises_tag
+            ON exercises(tag)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_days_program
+            ON days(program_id)
+        """)
 
         await db.commit()
-
-
-async def get_db():
-    """Получение соединения с БД."""
-    return await aiosqlite.connect(DATABASE_PATH)
 
 
 # ==================== PROGRAMS ====================
 
 async def create_program(name: str) -> int:
     """Создать программу тренировок."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "INSERT INTO programs (name) VALUES (?)", (name,)
         )
-        await db.commit()
         return cursor.lastrowid
 
 
 async def get_all_programs() -> list:
     """Получить все программы."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute("SELECT * FROM programs ORDER BY name")
         return await cursor.fetchall()
 
 
 async def get_program(program_id: int) -> dict | None:
     """Получить программу по ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM programs WHERE id = ?", (program_id,)
         )
@@ -150,28 +270,25 @@ async def get_program(program_id: int) -> dict | None:
 
 async def delete_program(program_id: int):
     """Удалить программу."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM programs WHERE id = ?", (program_id,))
-        await db.commit()
 
 
 # ==================== DAYS ====================
 
-async def create_day(program_id: int, day_number: int, name: str = None) -> int:
+async def create_day(program_id: int, day_number: int, name: str = None, description: str = None) -> int:
     """Создать день в программе."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
-            "INSERT INTO days (program_id, day_number, name) VALUES (?, ?, ?)",
-            (program_id, day_number, name)
+            "INSERT INTO days (program_id, day_number, name, description) VALUES (?, ?, ?, ?)",
+            (program_id, day_number, name, description)
         )
-        await db.commit()
         return cursor.lastrowid
 
 
 async def get_days_by_program(program_id: int) -> list:
     """Получить все дни программы."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM days WHERE program_id = ? ORDER BY day_number",
             (program_id,)
@@ -181,8 +298,7 @@ async def get_days_by_program(program_id: int) -> list:
 
 async def get_day(day_id: int) -> dict | None:
     """Получить день по ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM days WHERE id = ?", (day_id,)
         )
@@ -191,51 +307,92 @@ async def get_day(day_id: int) -> dict | None:
 
 async def delete_day(day_id: int):
     """Удалить день."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM days WHERE id = ?", (day_id,))
-        await db.commit()
 
 
 # ==================== EXERCISES ====================
 
 async def create_exercise(
-    day_id: int,
     name: str,
     description: str = None,
     image_file_id: str = None,
-    order_num: int = 0,
     tag: str = None,
     weight_type: int = 10
 ) -> int:
-    """Создать упражнение.
+    """Создать упражнение в библиотеке.
 
     weight_type: 0=без веса, 10=гантели, 100=штанга
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
-            """INSERT INTO exercises (day_id, name, description, image_file_id, order_num, tag, weight_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (day_id, name, description, image_file_id, order_num, tag.lower() if tag else None, weight_type)
+            """INSERT INTO exercises (name, description, image_file_id, tag, weight_type)
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, description, image_file_id, tag.lower() if tag else None, weight_type)
         )
-        await db.commit()
         return cursor.lastrowid
 
 
 async def get_exercises_by_day(day_id: int) -> list:
-    """Получить все упражнения дня."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    """Получить все упражнения дня через day_exercises."""
+    async with get_db() as db:
         cursor = await db.execute(
-            "SELECT * FROM exercises WHERE day_id = ? ORDER BY order_num, id",
+            """SELECT e.*, de.order_num
+               FROM exercises e
+               JOIN day_exercises de ON e.id = de.exercise_id
+               WHERE de.day_id = ?
+               ORDER BY de.order_num, e.id""",
             (day_id,)
+        )
+        return await cursor.fetchall()
+
+
+async def get_all_exercises() -> list:
+    """Получить все упражнения из библиотеки."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM exercises ORDER BY name"
+        )
+        return await cursor.fetchall()
+
+
+async def add_exercise_to_day(exercise_id: int, day_id: int, order_num: int = 0):
+    """Добавить упражнение в день."""
+    async with get_db() as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO day_exercises (day_id, exercise_id, order_num)
+               VALUES (?, ?, ?)""",
+            (day_id, exercise_id, order_num)
+        )
+
+
+async def remove_exercise_from_day(exercise_id: int, day_id: int):
+    """Убрать упражнение из дня (не удаляет само упражнение)."""
+    async with get_db() as db:
+        await db.execute(
+            "DELETE FROM day_exercises WHERE exercise_id = ? AND day_id = ?",
+            (exercise_id, day_id)
+        )
+
+
+async def get_exercise_days(exercise_id: int) -> list:
+    """Получить все дни, в которых используется упражнение."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT d.*, p.name as program_name
+               FROM days d
+               JOIN day_exercises de ON d.id = de.day_id
+               JOIN programs p ON d.program_id = p.id
+               WHERE de.exercise_id = ?
+               ORDER BY p.name, d.day_number""",
+            (exercise_id,)
         )
         return await cursor.fetchall()
 
 
 async def get_exercise(exercise_id: int) -> dict | None:
     """Получить упражнение по ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM exercises WHERE id = ?", (exercise_id,)
         )
@@ -244,19 +401,17 @@ async def get_exercise(exercise_id: int) -> dict | None:
 
 async def update_exercise_image(exercise_id: int, image_file_id: str):
     """Обновить картинку упражнения."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE exercises SET image_file_id = ? WHERE id = ?",
             (image_file_id, exercise_id)
         )
-        await db.commit()
 
 
 async def delete_exercise(exercise_id: int):
     """Удалить упражнение."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM exercises WHERE id = ?", (exercise_id,))
-        await db.commit()
 
 
 # ==================== WORKOUT LOGS ====================
@@ -270,20 +425,18 @@ async def log_workout(
     date: str
 ) -> int:
     """Записать выполнение упражнения."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """INSERT INTO workout_logs (user_id, exercise_id, weight, reps, set_num, date)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (user_id, exercise_id, weight, reps, set_num, date)
         )
-        await db.commit()
         return cursor.lastrowid
 
 
 async def get_exercise_history(user_id: int, exercise_id: int, limit: int = 20) -> list:
     """Получить историю выполнения упражнения пользователем."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT * FROM workout_logs
                WHERE user_id = ? AND exercise_id = ?
@@ -296,8 +449,7 @@ async def get_exercise_history(user_id: int, exercise_id: int, limit: int = 20) 
 
 async def get_last_workout(user_id: int, exercise_id: int) -> list:
     """Получить последнюю тренировку по упражнению."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         # Находим последнюю дату
         cursor = await db.execute(
             """SELECT date FROM workout_logs
@@ -319,6 +471,38 @@ async def get_last_workout(user_id: int, exercise_id: int) -> list:
         return await cursor.fetchall()
 
 
+async def get_last_workouts(user_id: int, exercise_id: int, limit: int = 2) -> list:
+    """Получить последние N тренировок по упражнению (сгруппированные по датам).
+
+    Возвращает список: [{"date": "2026-01-10", "logs": [...]}, ...]
+    """
+    async with get_db() as db:
+        # Находим последние N уникальных дат
+        cursor = await db.execute(
+            """SELECT DISTINCT date FROM workout_logs
+               WHERE user_id = ? AND exercise_id = ?
+               ORDER BY date DESC LIMIT ?""",
+            (user_id, exercise_id, limit)
+        )
+        dates = [row["date"] for row in await cursor.fetchall()]
+
+        if not dates:
+            return []
+
+        result = []
+        for d in dates:
+            cursor = await db.execute(
+                """SELECT * FROM workout_logs
+                   WHERE user_id = ? AND exercise_id = ? AND date = ?
+                   ORDER BY set_num""",
+                (user_id, exercise_id, d)
+            )
+            logs = await cursor.fetchall()
+            result.append({"date": d, "logs": logs})
+
+        return result
+
+
 async def get_user_stats(user_id: int) -> dict:
     """Получить статистику пользователя (workout_logs + custom_logs)."""
     from datetime import date
@@ -326,7 +510,7 @@ async def get_user_stats(user_id: int) -> dict:
     today = date.today()
     month_start = today.replace(day=1).isoformat()
 
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         # Тренировок в этом месяце
         cursor = await db.execute(
             """SELECT COUNT(DISTINCT date) FROM (
@@ -364,20 +548,29 @@ async def get_user_stats(user_id: int) -> dict:
 
 async def delete_workout_log(log_id: int, user_id: int):
     """Удалить запись о тренировке (только свою)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM workout_logs WHERE id = ? AND user_id = ?",
             (log_id, user_id)
         )
-        await db.commit()
+
+
+async def get_workout_sets_count(user_id: int, exercise_id: int, date: str) -> int:
+    """Получить количество подходов за день для упражнения."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM workout_logs
+               WHERE user_id = ? AND exercise_id = ? AND date = ?""",
+            (user_id, exercise_id, date)
+        )
+        return (await cursor.fetchone())[0]
 
 
 # ==================== USER PROGRESS ====================
 
 async def get_user_progress(user_id: int) -> dict | None:
     """Получить прогресс пользователя."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM user_progress WHERE user_id = ?",
             (user_id,)
@@ -387,7 +580,7 @@ async def get_user_progress(user_id: int) -> dict | None:
 
 async def set_user_program(user_id: int, program_id: int):
     """Установить активную программу для пользователя (начать с дня 1)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO user_progress (user_id, program_id, current_day_num, is_finished)
                VALUES (?, ?, 1, 0)
@@ -398,7 +591,6 @@ async def set_user_program(user_id: int, program_id: int):
                    last_completed_date = NULL""",
             (user_id, program_id)
         )
-        await db.commit()
 
 
 async def complete_day(user_id: int) -> bool:
@@ -406,9 +598,7 @@ async def complete_day(user_id: int) -> bool:
     from datetime import date
     today = date.today().isoformat()
 
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with get_db() as db:
         # Получаем текущий прогресс
         cursor = await db.execute(
             "SELECT * FROM user_progress WHERE user_id = ?",
@@ -437,7 +627,6 @@ async def complete_day(user_id: int) -> bool:
                    WHERE user_id = ?""",
                 (today, user_id)
             )
-            await db.commit()
             return True
         else:
             # Переходим к следующему дню
@@ -447,15 +636,12 @@ async def complete_day(user_id: int) -> bool:
                    WHERE user_id = ?""",
                 (next_day, today, user_id)
             )
-            await db.commit()
             return False
 
 
 async def get_current_day_info(user_id: int) -> dict | None:
     """Получить информацию о текущем дне пользователя."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with get_db() as db:
         # Получаем прогресс
         cursor = await db.execute(
             "SELECT * FROM user_progress WHERE user_id = ?",
@@ -506,12 +692,11 @@ async def get_current_day_info(user_id: int) -> dict | None:
 
 async def clear_user_progress(user_id: int):
     """Сбросить прогресс пользователя."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM user_progress WHERE user_id = ?",
             (user_id,)
         )
-        await db.commit()
 
 
 # ==================== CUSTOM LOGS (свои упражнения) ====================
@@ -525,7 +710,7 @@ async def log_custom_exercise(
     duration_minutes: int = None
 ) -> int:
     """Записать своё упражнение (силовое или кардио)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         # Считаем номер подхода за сегодня для этого упражнения
         cursor = await db.execute(
             """SELECT COUNT(*) FROM custom_logs
@@ -540,14 +725,12 @@ async def log_custom_exercise(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (user_id, name, weight, reps, duration_minutes, set_num, date)
         )
-        await db.commit()
         return cursor.lastrowid
 
 
 async def get_custom_history(user_id: int, name: str, limit: int = 20) -> list:
     """Получить историю своего упражнения."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT * FROM custom_logs
                WHERE user_id = ? AND name = ?
@@ -560,7 +743,7 @@ async def get_custom_history(user_id: int, name: str, limit: int = 20) -> list:
 
 async def get_recent_custom_exercises(user_id: int, limit: int = 5) -> list:
     """Получить последние свои упражнения (уникальные названия)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT DISTINCT name FROM custom_logs
                WHERE user_id = ?
@@ -574,8 +757,7 @@ async def get_recent_custom_exercises(user_id: int, limit: int = 5) -> list:
 
 async def get_today_custom_logs(user_id: int, date: str) -> list:
     """Получить свои упражнения за сегодня."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT * FROM custom_logs
                WHERE user_id = ? AND date = ?
@@ -587,9 +769,7 @@ async def get_today_custom_logs(user_id: int, date: str) -> list:
 
 async def get_daily_activity(user_id: int, date: str) -> dict:
     """Получить активность за конкретный день."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with get_db() as db:
         # Упражнения из программы
         cursor = await db.execute(
             """SELECT e.name, wl.weight, wl.reps, wl.set_num
@@ -621,7 +801,7 @@ async def get_daily_activity(user_id: int, date: str) -> dict:
 
 async def is_user_allowed(user_id: int) -> bool:
     """Проверить, разрешён ли пользователь."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT 1 FROM allowed_users WHERE user_id = ?",
             (user_id,)
@@ -631,29 +811,26 @@ async def is_user_allowed(user_id: int) -> bool:
 
 async def add_allowed_user(user_id: int, username: str = None, full_name: str = None):
     """Добавить пользователя в список разрешённых."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT OR REPLACE INTO allowed_users (user_id, username, full_name)
                VALUES (?, ?, ?)""",
             (user_id, username, full_name)
         )
-        await db.commit()
 
 
 async def remove_allowed_user(user_id: int):
     """Удалить пользователя из списка разрешённых."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM allowed_users WHERE user_id = ?",
             (user_id,)
         )
-        await db.commit()
 
 
 async def get_all_allowed_users() -> list:
     """Получить всех разрешённых пользователей."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM allowed_users ORDER BY approved_at DESC"
         )
@@ -667,7 +844,7 @@ async def get_all_tags() -> list:
 
     Теги могут храниться через запятую, поэтому разбираем их.
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT tag FROM exercises WHERE tag IS NOT NULL AND tag != ''"""
         )
@@ -688,21 +865,23 @@ async def get_exercises_by_tag(tag: str) -> list:
     """Получить все упражнения с данным тегом (из всех программ).
 
     Ищет тег в списке тегов, разделённых запятыми.
+    Упражнение может быть в нескольких днях - возвращаем уникальные упражнения.
     """
     tag = tag.strip().lower()
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        # Ищем: точное совпадение, или в начале с запятой, или в конце с запятой, или в середине
+    async with get_db() as db:
+        # Получаем упражнения с первым найденным днём (для отображения контекста)
         cursor = await db.execute(
-            """SELECT e.*, d.name as day_name, d.day_number, p.name as program_name
+            """SELECT DISTINCT e.*, d.name as day_name, d.day_number, p.name as program_name
                FROM exercises e
-               JOIN days d ON e.day_id = d.id
-               JOIN programs p ON d.program_id = p.id
+               LEFT JOIN day_exercises de ON e.id = de.exercise_id
+               LEFT JOIN days d ON de.day_id = d.id
+               LEFT JOIN programs p ON d.program_id = p.id
                WHERE LOWER(e.tag) = ?
                   OR LOWER(e.tag) LIKE ?
                   OR LOWER(e.tag) LIKE ?
                   OR LOWER(e.tag) LIKE ?
-               ORDER BY p.name, d.day_number, e.order_num""",
+               GROUP BY e.id
+               ORDER BY e.name""",
             (tag, f"{tag},%", f"%, {tag}", f"%, {tag},%")
         )
         return await cursor.fetchall()
@@ -710,9 +889,8 @@ async def get_exercises_by_tag(tag: str) -> list:
 
 async def update_exercise_tag(exercise_id: int, tag: str | None):
     """Обновить тег упражнения."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE exercises SET tag = ? WHERE id = ?",
             (tag.lower() if tag else None, exercise_id)
         )
-        await db.commit()

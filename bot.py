@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
-from database import init_db
+from database import init_db, close_connection
 from middleware import AccessMiddleware
 from handlers import (
     access_router,
@@ -54,7 +54,9 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        await close_connection()
         await bot.session.close()
+        logger.info("Bot stopped, connections closed")
 
 
 if __name__ == "__main__":

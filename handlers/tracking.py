@@ -21,8 +21,15 @@ class LogWorkout(StatesGroup):
 
 @router.callback_query(F.data.startswith("log:"))
 async def start_logging(callback: CallbackQuery, state: FSMContext):
-    """Начать запись подхода."""
-    exercise_id = int(callback.data.split(":")[1])
+    """Начать запись подхода.
+
+    Формат callback_data: log:{exercise_id}:{day_id}
+    day_id может быть 0 если упражнение открыто не из дня.
+    """
+    parts = callback.data.split(":")
+    exercise_id = int(parts[1])
+    day_id = int(parts[2]) if len(parts) > 2 else 0
+
     exercise = await db.get_exercise(exercise_id)
 
     if not exercise:
@@ -32,10 +39,14 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     today = date.today().isoformat()
 
-    # Получаем day_id и список упражнений дня для навигации
-    day_id = exercise["day_id"] if "day_id" in exercise.keys() else None
-    next_exercise_id = None
+    # Если day_id=0, пытаемся найти первый день с этим упражнением
+    if day_id == 0:
+        exercise_days = await db.get_exercise_days(exercise_id)
+        if exercise_days:
+            day_id = exercise_days[0]["id"]
 
+    # Находим следующее упражнение (только если есть контекст дня)
+    next_exercise_id = None
     if day_id:
         exercises = await db.get_exercises_by_day(day_id)
         for i, ex in enumerate(exercises):
@@ -209,15 +220,9 @@ async def save_workout(message, state: FSMContext, sets: int, is_callback: bool)
     user_id = message.chat.id
 
     # Получаем текущее количество подходов
-    from aiosqlite import connect
-    from config import DATABASE_PATH
-    async with connect(DATABASE_PATH) as conn:
-        cursor = await conn.execute(
-            """SELECT COUNT(*) FROM workout_logs
-               WHERE user_id = ? AND exercise_id = ? AND date = ?""",
-            (user_id, data["exercise_id"], data["date"])
-        )
-        current_count = (await cursor.fetchone())[0]
+    current_count = await db.get_workout_sets_count(
+        user_id, data["exercise_id"], data["date"]
+    )
 
     # Сохраняем каждый подход
     for i in range(sets):

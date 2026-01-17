@@ -3,7 +3,7 @@ from aiogram.types import CallbackQuery, InputMediaPhoto
 
 from keyboards import (
     programs_kb, days_kb, exercises_kb, exercise_detail_kb,
-    all_workouts_kb, tags_kb, tag_exercises_kb
+    all_workouts_kb, tags_kb, tag_exercises_kb, exercise_from_tag_kb
 )
 import database as db
 
@@ -143,30 +143,47 @@ async def back_to_days(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("exercise:"))
 async def show_exercise(callback: CallbackQuery):
-    """Показать упражнение с картинкой."""
+    """Показать упражнение с картинкой.
+
+    Форматы callback_data:
+    - exercise:{id}:{day_id} - обычный просмотр из дня
+    - exercise:{id}:0:tag:{tag_name} - просмотр из списка по тегу
+    """
     from config import ADMIN_ID
 
-    exercise_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    exercise_id = int(parts[1])
+    day_id = int(parts[2]) if len(parts) > 2 else 0
+
+    # Если это из тегов — запоминаем для кнопки "назад"
+    from_tag = None
+    if len(parts) > 4 and parts[3] == "tag":
+        from_tag = parts[4]
+
     exercise = await db.get_exercise(exercise_id)
 
     if not exercise:
         await callback.answer("Упражнение не найдено", show_alert=True)
         return
 
-    day = await db.get_day(exercise["day_id"])
+    # Если day_id=0, пытаемся найти первый день с этим упражнением
+    if day_id == 0:
+        exercise_days = await db.get_exercise_days(exercise_id)
+        if exercise_days:
+            day_id = exercise_days[0]["id"]
 
-    # Находим следующее упражнение
+    # Находим следующее упражнение (только если есть контекст дня)
     next_exercise_id = None
-    if day:
-        exercises = await db.get_exercises_by_day(exercise["day_id"])
+    if day_id:
+        exercises = await db.get_exercises_by_day(day_id)
         for i, ex in enumerate(exercises):
             if ex["id"] == exercise_id and i + 1 < len(exercises):
                 next_exercise_id = exercises[i + 1]["id"]
                 break
 
-    # Получаем последнюю тренировку
+    # Получаем последние 2 тренировки
     user_id = callback.from_user.id
-    last_workout = await db.get_last_workout(user_id, exercise_id)
+    last_workouts = await db.get_last_workouts(user_id, exercise_id, limit=2)
 
     text = f"💪 {exercise['name']}\n"
 
@@ -179,13 +196,40 @@ async def show_exercise(callback: CallbackQuery):
     if exercise["description"]:
         text += f"\n{exercise['description']}\n"
 
-    if last_workout:
-        text += "\n📊 Последняя тренировка:\n"
-        for log in last_workout:
-            text += f"  Подход {log['set_num']}: {log['weight']} кг × {log['reps']} раз\n"
+    if last_workouts:
+        from datetime import date as dt_date
+        text += "\n📊 История:\n"
+
+        for workout in last_workouts:
+            # Форматируем дату
+            try:
+                d = dt_date.fromisoformat(workout["date"])
+                date_str = d.strftime("%d.%m")
+            except:
+                date_str = workout["date"]
+
+            # Группируем одинаковые подходы (вес × повторения)
+            groups = {}
+            for log in workout["logs"]:
+                key = (log["weight"], log["reps"])
+                groups[key] = groups.get(key, 0) + 1
+
+            # Форматируем подходы в одну строку
+            sets_parts = []
+            for (weight, reps), count in groups.items():
+                weight_str = f"{int(weight)}" if weight == int(weight) else f"{weight}"
+                sets_str = f"×{count}" if count > 1 else ""
+                sets_parts.append(f"{weight_str}кг ×{reps}{sets_str}")
+
+            text += f"  {date_str}: {', '.join(sets_parts)}\n"
 
     is_admin = user_id == ADMIN_ID
-    kb = exercise_detail_kb(exercise_id, exercise["day_id"], is_admin=is_admin, next_exercise_id=next_exercise_id)
+
+    # Если из тегов — используем специальную клавиатуру
+    if from_tag:
+        kb = exercise_from_tag_kb(exercise_id, day_id, from_tag, is_admin=is_admin)
+    else:
+        kb = exercise_detail_kb(exercise_id, day_id, is_admin=is_admin, next_exercise_id=next_exercise_id)
 
     # Если есть картинка — отправляем фото
     if exercise["image_file_id"]:

@@ -20,6 +20,15 @@ class CustomMode(StatesGroup):
     waiting_for_reps = State()
 
 
+class UserCreateExercise(StatesGroup):
+    """Создание упражнения пользователем."""
+    waiting_for_name = State()
+    waiting_for_description = State()
+    waiting_for_tag = State()
+    waiting_for_weight_type = State()
+    waiting_for_image = State()
+
+
 def custom_mode_kb(has_entries: bool) -> InlineKeyboardMarkup:
     """Клавиатура режима своих упражнений."""
     builder = InlineKeyboardBuilder()
@@ -265,4 +274,238 @@ async def process_reps(message: Message, state: FSMContext):
         f"✅ <b>{data['name']}</b> — {data['weight']} кг × {reps} {sets_text}",
         parse_mode="HTML",
         reply_markup=add_more_kb()
+    )
+
+
+# ==================== USER CREATE EXERCISE ====================
+
+def user_cancel_kb() -> InlineKeyboardMarkup:
+    """Кнопка отмены для пользователя."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_user_create")
+    )
+    return builder.as_markup()
+
+
+def user_skip_kb(skip_callback: str) -> InlineKeyboardMarkup:
+    """Кнопка пропустить для пользователя."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data=skip_callback)
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_user_create")
+    )
+    return builder.as_markup()
+
+
+def user_weight_type_kb() -> InlineKeyboardMarkup:
+    """Выбор типа веса для пользователя."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🏋️ Штанга", callback_data="user_wt:100"),
+        InlineKeyboardButton(text="💪 Гантели", callback_data="user_wt:10")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🤸 Без веса", callback_data="user_wt:0")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_user_create")
+    )
+    return builder.as_markup()
+
+
+@router.callback_query(F.data == "user_create_exercise")
+async def start_user_create_exercise(callback: CallbackQuery, state: FSMContext):
+    """Начать создание упражнения пользователем."""
+    await state.set_state(UserCreateExercise.waiting_for_name)
+
+    await callback.message.edit_text(
+        "➕ Создание упражнения\n\n"
+        "Введи название упражнения:",
+        reply_markup=user_cancel_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_user_create")
+async def cancel_user_create(callback: CallbackQuery, state: FSMContext):
+    """Отмена создания упражнения."""
+    await state.clear()
+
+    from handlers.start import get_main_text_and_kb
+    text, kb = await get_main_text_and_kb(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(UserCreateExercise.waiting_for_name)
+async def process_user_exercise_name(message: Message, state: FSMContext):
+    """Обработка названия упражнения."""
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer(
+            "Название слишком короткое. Минимум 2 символа:",
+            reply_markup=user_cancel_kb()
+        )
+        return
+
+    await state.update_data(exercise_name=name)
+    await state.set_state(UserCreateExercise.waiting_for_description)
+
+    await message.answer(
+        f"Упражнение: {name}\n\n"
+        "Введи описание (или нажми Пропустить):\n"
+        "Например: 3×12, техника, подсказки",
+        reply_markup=user_skip_kb("user_skip_desc")
+    )
+
+
+@router.callback_query(UserCreateExercise.waiting_for_description, F.data == "user_skip_desc")
+async def skip_user_description(callback: CallbackQuery, state: FSMContext):
+    """Пропустить описание."""
+    await state.update_data(description=None)
+    await state.set_state(UserCreateExercise.waiting_for_tag)
+
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nПопулярные теги: " + ", ".join(t["name"] for t in tags[:10])
+
+    await callback.message.edit_text(
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=user_skip_kb("user_skip_tag")
+    )
+    await callback.answer()
+
+
+@router.message(UserCreateExercise.waiting_for_description)
+async def process_user_description(message: Message, state: FSMContext):
+    """Обработка описания."""
+    description = message.text.strip()
+    await state.update_data(description=description)
+    await state.set_state(UserCreateExercise.waiting_for_tag)
+
+    tags = await db.get_all_tags()
+    tags_hint = ""
+    if tags:
+        tags_hint = "\n\nПопулярные теги: " + ", ".join(t["name"] for t in tags[:10])
+
+    await message.answer(
+        f"Введи тег (группа мышц){tags_hint}\n\n"
+        "Например: бицепс, грудь, ноги\n"
+        "(или нажми Пропустить)",
+        reply_markup=user_skip_kb("user_skip_tag")
+    )
+
+
+@router.callback_query(UserCreateExercise.waiting_for_tag, F.data == "user_skip_tag")
+async def skip_user_tag(callback: CallbackQuery, state: FSMContext):
+    """Пропустить тег."""
+    await state.update_data(tag=None)
+    await state.set_state(UserCreateExercise.waiting_for_weight_type)
+
+    await callback.message.edit_text(
+        "Выбери тип веса для упражнения:",
+        reply_markup=user_weight_type_kb()
+    )
+    await callback.answer()
+
+
+@router.message(UserCreateExercise.waiting_for_tag)
+async def process_user_tag(message: Message, state: FSMContext):
+    """Обработка тега."""
+    tag = message.text.strip().lower()
+    await state.update_data(tag=tag)
+    await state.set_state(UserCreateExercise.waiting_for_weight_type)
+
+    await message.answer(
+        f"Тег: #{tag}\n\n"
+        "Выбери тип веса для упражнения:",
+        reply_markup=user_weight_type_kb()
+    )
+
+
+@router.callback_query(UserCreateExercise.waiting_for_weight_type, F.data.startswith("user_wt:"))
+async def process_user_weight_type(callback: CallbackQuery, state: FSMContext):
+    """Обработка типа веса."""
+    weight_type = int(callback.data.split(":")[1])
+    await state.update_data(weight_type=weight_type)
+    await state.set_state(UserCreateExercise.waiting_for_image)
+
+    type_names = {0: "без веса", 10: "гантели", 100: "штанга"}
+    await callback.message.edit_text(
+        f"Тип веса: {type_names.get(weight_type, 'гантели')}\n\n"
+        "Теперь отправь картинку упражнения (или нажми Пропустить):",
+        reply_markup=user_skip_kb("user_skip_image")
+    )
+    await callback.answer()
+
+
+@router.callback_query(UserCreateExercise.waiting_for_image, F.data == "user_skip_image")
+async def skip_user_image(callback: CallbackQuery, state: FSMContext):
+    """Пропустить картинку и сохранить упражнение."""
+    data = await state.get_data()
+
+    await db.create_exercise(
+        name=data["exercise_name"],
+        description=data.get("description"),
+        image_file_id=None,
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
+    )
+
+    await state.clear()
+
+    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
+
+    from handlers.start import get_main_text_and_kb
+    text, kb = await get_main_text_and_kb(callback.from_user.id)
+
+    await callback.message.edit_text(
+        f"✅ Упражнение «{data['exercise_name']}»{tag_text} создано!\n\n" + text,
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.message(UserCreateExercise.waiting_for_image, F.photo)
+async def process_user_image(message: Message, state: FSMContext):
+    """Обработка картинки."""
+    data = await state.get_data()
+
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    await db.create_exercise(
+        name=data["exercise_name"],
+        description=data.get("description"),
+        image_file_id=file_id,
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10)
+    )
+
+    await state.clear()
+
+    tag_text = f" (#{data['tag']})" if data.get("tag") else ""
+
+    from handlers.start import get_main_text_and_kb
+    text, kb = await get_main_text_and_kb(message.from_user.id)
+
+    await message.answer(
+        f"✅ Упражнение «{data['exercise_name']}»{tag_text} создано!\n\n" + text,
+        reply_markup=kb
+    )
+
+
+@router.message(UserCreateExercise.waiting_for_image)
+async def wrong_user_image_format(message: Message, state: FSMContext):
+    """Неправильный формат — ожидаем фото."""
+    await message.answer(
+        "Отправь картинку как фото, или нажми Пропустить:",
+        reply_markup=user_skip_kb("user_skip_image")
     )
