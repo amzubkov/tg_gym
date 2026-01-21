@@ -250,19 +250,9 @@ async def complete_day(callback: CallbackQuery):
     user_id = callback.from_user.id
     current_day = await db.get_current_day_info(user_id)
 
-    if not current_day:
-        await callback.answer("Нет активной программы", show_alert=True)
-        return
-
-    # Получаем сводку дня до завершения
+    # Получаем сводку дня
     today = date.today().isoformat()
     activity = await db.get_daily_activity(user_id, today)
-
-    # Формируем сводку
-    day_name = current_day["day_name"] or f"День {current_day['day_number']}"
-    header = f"{current_day['program_name']} - {day_name}"
-
-    summary_lines = [header, ""]
 
     # Упражнения из программы - группируем по названию
     exercises = {}
@@ -286,7 +276,36 @@ async def complete_day(callback: CallbackQuery):
                 exercises[name] = {"weight": c["weight"], "reps": c["reps"], "sets": 0}
             exercises[name]["sets"] += 1
 
-    # Форматируем с номерами
+    # Если нет активной программы — просто показываем итог дня
+    if not current_day:
+        if not exercises:
+            await callback.answer("Нет записей за сегодня", show_alert=True)
+            return
+
+        summary_lines = ["Итог дня", ""]
+        for i, (name, data) in enumerate(exercises.items(), 1):
+            if "duration" in data:
+                summary_lines.append(f"{i}. {name}: {data['duration']}мин")
+            else:
+                summary_lines.append(f"{i}. {name}: {data['weight']}кг {data['reps']}×{data['sets']}")
+
+        summary = "\n".join(summary_lines)
+        copyable_summary = f"```\n{summary}\n```"
+
+        await callback.message.edit_text(
+            f"✅ Тренировка завершена!\n\n"
+            f"📝 {copyable_summary}",
+            parse_mode="Markdown",
+            reply_markup=main_menu_kb()
+        )
+        await callback.answer()
+        return
+
+    # Формируем сводку с названием программы
+    day_name = current_day["day_name"] or f"День {current_day['day_number']}"
+    header = f"{current_day['program_name']} - {day_name}"
+
+    summary_lines = [header, ""]
     for i, (name, data) in enumerate(exercises.items(), 1):
         if "duration" in data:
             summary_lines.append(f"{i}. {name}: {data['duration']}мин")
@@ -294,7 +313,6 @@ async def complete_day(callback: CallbackQuery):
             summary_lines.append(f"{i}. {name}: {data['weight']}кг {data['reps']}×{data['sets']}")
 
     summary = "\n".join(summary_lines) if len(summary_lines) > 2 else "Нет записей"
-    # Форматируем для копирования
     copyable_summary = f"```\n{summary}\n```"
 
     # Завершаем день
