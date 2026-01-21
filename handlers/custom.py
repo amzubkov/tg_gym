@@ -2,7 +2,7 @@ import re
 from datetime import date
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ForceReply
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -52,6 +52,17 @@ def after_custom_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Закончить день", callback_data="finish_custom")
     )
     return builder.as_markup()
+
+
+def is_group_chat(chat) -> bool:
+    """Проверить, что чат групповый (privacy mode)."""
+    return chat.type in ("group", "supergroup")
+
+
+async def send_force_reply_if_group(message: Message, text: str) -> None:
+    """В группах просим отвечать на сообщение, чтобы бот получил ввод."""
+    if is_group_chat(message.chat):
+        await message.answer(text, reply_markup=ForceReply(selective=True))
 
 
 def parse_exercise_input(text: str) -> dict | None:
@@ -133,6 +144,11 @@ async def start_custom_mode(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=custom_mode_kb(has_entries)
     )
+    if callback.message:
+        await send_force_reply_if_group(
+            callback.message,
+            "Ответь на это сообщение своим упражнением."
+        )
     await callback.answer()
 
 
@@ -204,6 +220,7 @@ async def process_name(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=after_custom_kb()
     )
+    await send_force_reply_if_group(message, "Ответь на это сообщение числом (вес).")
 
 
 @router.message(CustomMode.waiting_for_weight)
@@ -216,6 +233,7 @@ async def process_weight(message: Message, state: FSMContext):
             "❌ Введи число (вес в кг):",
             reply_markup=after_custom_kb()
         )
+        await send_force_reply_if_group(message, "Ответь на это сообщение числом (вес).")
         return
 
     data = await state.get_data()
@@ -229,6 +247,7 @@ async def process_weight(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=after_custom_kb()
     )
+    await send_force_reply_if_group(message, "Ответь на это сообщение повторами.")
 
 
 @router.message(CustomMode.waiting_for_reps)
@@ -251,6 +270,7 @@ async def process_reps(message: Message, state: FSMContext):
                 parse_mode="HTML",
                 reply_markup=after_custom_kb()
             )
+            await send_force_reply_if_group(message, "Ответь на это сообщение повторами.")
             return
 
     data = await state.get_data()

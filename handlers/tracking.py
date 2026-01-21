@@ -45,10 +45,13 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
         if exercise_days:
             day_id = exercise_days[0]["id"]
 
-    # Находим следующее упражнение (только если есть контекст дня)
+    # Находим следующее и первое упражнение (только если есть контекст дня)
     next_exercise_id = None
+    first_exercise_id = None
     if day_id:
         exercises = await db.get_exercises_by_day(day_id)
+        if exercises:
+            first_exercise_id = exercises[0]["id"]
         for i, ex in enumerate(exercises):
             if ex["id"] == exercise_id and i + 1 < len(exercises):
                 next_exercise_id = exercises[i + 1]["id"]
@@ -62,6 +65,7 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
         exercise_name=exercise["name"],
         day_id=day_id,
         next_exercise_id=next_exercise_id,
+        first_exercise_id=first_exercise_id,
         weight_type=weight_type,
         date=today
     )
@@ -247,7 +251,8 @@ async def save_workout(message, state: FSMContext, sets: int, is_callback: bool)
     kb = after_log_kb(
         exercise_id=data["exercise_id"],
         next_exercise_id=data.get("next_exercise_id"),
-        day_id=data.get("day_id")
+        day_id=data.get("day_id"),
+        first_exercise_id=data.get("first_exercise_id")
     )
 
     if is_callback:

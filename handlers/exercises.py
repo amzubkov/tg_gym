@@ -96,6 +96,8 @@ async def show_program_days(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("day:"))
 async def show_day_exercises(callback: CallbackQuery):
     """Показать упражнения дня."""
+    from config import ADMIN_ID
+
     day_id = int(callback.data.split(":")[1])
     day = await db.get_day(day_id)
 
@@ -110,9 +112,12 @@ async def show_day_exercises(callback: CallbackQuery):
         await callback.answer("В этом дне пока нет упражнений", show_alert=True)
         return
 
+    user_id = callback.from_user.id
+    is_admin = user_id == ADMIN_ID
+
     day_name = day["name"] if day["name"] else f"День {day['day_number']}"
     text = f"📋 {program['name']} — {day_name}\n\nВыбери упражнение:"
-    kb = exercises_kb(exercises, day_id)
+    kb = exercises_kb(exercises, day_id, is_admin=is_admin)
 
     # Если текущее сообщение — фото, удаляем и отправляем текст
     if callback.message.photo:
@@ -172,10 +177,13 @@ async def show_exercise(callback: CallbackQuery):
         if exercise_days:
             day_id = exercise_days[0]["id"]
 
-    # Находим следующее упражнение (только если есть контекст дня)
+    # Находим следующее и первое упражнение (только если есть контекст дня)
     next_exercise_id = None
+    first_exercise_id = None
     if day_id:
         exercises = await db.get_exercises_by_day(day_id)
+        if exercises:
+            first_exercise_id = exercises[0]["id"]
         for i, ex in enumerate(exercises):
             if ex["id"] == exercise_id and i + 1 < len(exercises):
                 next_exercise_id = exercises[i + 1]["id"]
@@ -229,7 +237,7 @@ async def show_exercise(callback: CallbackQuery):
     if from_tag:
         kb = exercise_from_tag_kb(exercise_id, day_id, from_tag, is_admin=is_admin)
     else:
-        kb = exercise_detail_kb(exercise_id, day_id, is_admin=is_admin, next_exercise_id=next_exercise_id)
+        kb = exercise_detail_kb(exercise_id, day_id, is_admin=is_admin, next_exercise_id=next_exercise_id, first_exercise_id=first_exercise_id)
 
     # Если есть картинка — отправляем фото
     if exercise["image_file_id"]:

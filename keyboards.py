@@ -42,7 +42,8 @@ def admin_menu_kb(has_active_program: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📚 Все тренировки", callback_data="all_workouts")
     )
     builder.row(
-        InlineKeyboardButton(text="✏️ Своё упражнение", callback_data="custom_exercise")
+        InlineKeyboardButton(text="✏️ Своё упражнение", callback_data="custom_exercise"),
+        InlineKeyboardButton(text="➕ Новое", callback_data="user_create_exercise")
     )
     builder.row(
         InlineKeyboardButton(text="🤖 Подобрать AI упражнения", callback_data="ai_exercises")
@@ -134,23 +135,36 @@ def days_kb(days: list, program_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def exercises_kb(exercises: list, day_id: int) -> InlineKeyboardMarkup:
+def exercises_kb(exercises: list, day_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
     """Список упражнений дня."""
     builder = InlineKeyboardBuilder()
-    for i, ex in enumerate(exercises, 1):
-        builder.row(
+    total = len(exercises)
+    for i, ex in enumerate(exercises):
+        row_buttons = [
             InlineKeyboardButton(
-                text=f"{i}. {ex['name']}",
+                text=f"{i+1}. {ex['name']}",
                 callback_data=f"exercise:{ex['id']}:{day_id}"
             )
-        )
+        ]
+        if is_admin:
+            # Кнопка вверх (если не первый)
+            if i > 0:
+                row_buttons.append(
+                    InlineKeyboardButton(text="↑", callback_data=f"move_ex:{ex['id']}:{day_id}:-1")
+                )
+            # Кнопка вниз (если не последний)
+            if i < total - 1:
+                row_buttons.append(
+                    InlineKeyboardButton(text="↓", callback_data=f"move_ex:{ex['id']}:{day_id}:1")
+                )
+        builder.row(*row_buttons)
     builder.row(
         InlineKeyboardButton(text="« Назад", callback_data=f"back_to_days:{day_id}")
     )
     return builder.as_markup()
 
 
-def exercise_detail_kb(exercise_id: int, day_id: int, is_admin: bool = False, next_exercise_id: int = None) -> InlineKeyboardMarkup:
+def exercise_detail_kb(exercise_id: int, day_id: int, is_admin: bool = False, next_exercise_id: int = None, first_exercise_id: int = None) -> InlineKeyboardMarkup:
     """Кнопки для конкретного упражнения."""
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -165,6 +179,14 @@ def exercise_detail_kb(exercise_id: int, day_id: int, is_admin: bool = False, ne
             InlineKeyboardButton(
                 text="⏭ Пропустить",
                 callback_data=f"exercise:{next_exercise_id}:{day_id}"
+            )
+        )
+    # Ещё круг — если это последнее упражнение и есть первое
+    elif first_exercise_id and first_exercise_id != exercise_id:
+        builder.row(
+            InlineKeyboardButton(
+                text="🔄 Ещё круг",
+                callback_data=f"exercise:{first_exercise_id}:{day_id}"
             )
         )
     builder.row(
@@ -538,7 +560,7 @@ def sets_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def after_log_kb(exercise_id: int, next_exercise_id: int = None, day_id: int = None) -> InlineKeyboardMarkup:
+def after_log_kb(exercise_id: int, next_exercise_id: int = None, day_id: int = None, first_exercise_id: int = None) -> InlineKeyboardMarkup:
     """Клавиатура после записи подхода."""
     builder = InlineKeyboardBuilder()
     day_suffix = f":{day_id}" if day_id else ":0"
@@ -548,6 +570,11 @@ def after_log_kb(exercise_id: int, next_exercise_id: int = None, day_id: int = N
     if next_exercise_id and day_id:
         builder.row(
             InlineKeyboardButton(text="➡️ Следующее", callback_data=f"exercise:{next_exercise_id}:{day_id}")
+        )
+    # Ещё круг — если это последнее упражнение
+    elif first_exercise_id and day_id and first_exercise_id != exercise_id:
+        builder.row(
+            InlineKeyboardButton(text="🔄 Ещё круг", callback_data=f"exercise:{first_exercise_id}:{day_id}")
         )
     if day_id:
         builder.row(

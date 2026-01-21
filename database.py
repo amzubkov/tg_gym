@@ -356,9 +356,19 @@ async def get_all_exercises() -> list:
         return await cursor.fetchall()
 
 
-async def add_exercise_to_day(exercise_id: int, day_id: int, order_num: int = 0):
-    """Добавить упражнение в день."""
+async def add_exercise_to_day(exercise_id: int, day_id: int, order_num: int = None):
+    """Добавить упражнение в день. Если order_num не указан, добавляет в конец."""
     async with get_db() as db:
+        if order_num is None:
+            # Получаем максимальный order_num и добавляем в конец
+            cursor = await db.execute(
+                "SELECT MAX(order_num) FROM day_exercises WHERE day_id = ?",
+                (day_id,)
+            )
+            result = await cursor.fetchone()
+            max_order = result[0] if result[0] is not None else -10
+            order_num = max_order + 10
+
         await db.execute(
             """INSERT OR IGNORE INTO day_exercises (day_id, exercise_id, order_num)
                VALUES (?, ?, ?)""",
@@ -372,6 +382,56 @@ async def remove_exercise_from_day(exercise_id: int, day_id: int):
         await db.execute(
             "DELETE FROM day_exercises WHERE exercise_id = ? AND day_id = ?",
             (exercise_id, day_id)
+        )
+
+
+async def move_exercise_in_day(exercise_id: int, day_id: int, direction: int):
+    """Переместить упражнение вверх (-1) или вниз (+1) в дне."""
+    async with get_db() as db:
+        # Получаем все упражнения дня с их порядком
+        cursor = await db.execute(
+            """SELECT exercise_id, order_num FROM day_exercises
+               WHERE day_id = ? ORDER BY order_num, exercise_id""",
+            (day_id,)
+        )
+        exercises = await cursor.fetchall()
+
+        # Находим текущий индекс упражнения
+        current_idx = None
+        for i, ex in enumerate(exercises):
+            if ex["exercise_id"] == exercise_id:
+                current_idx = i
+                break
+
+        if current_idx is None:
+            return
+
+        # Вычисляем новый индекс
+        new_idx = current_idx + direction
+        if new_idx < 0 or new_idx >= len(exercises):
+            return  # Уже на краю
+
+        # Меняем местами order_num
+        other_exercise_id = exercises[new_idx]["exercise_id"]
+
+        # Присваиваем последовательные номера для надёжности
+        for i, ex in enumerate(exercises):
+            await db.execute(
+                "UPDATE day_exercises SET order_num = ? WHERE day_id = ? AND exercise_id = ?",
+                (i * 10, day_id, ex["exercise_id"])
+            )
+
+        # Теперь меняем местами два упражнения
+        current_order = current_idx * 10
+        new_order = new_idx * 10
+
+        await db.execute(
+            "UPDATE day_exercises SET order_num = ? WHERE day_id = ? AND exercise_id = ?",
+            (new_order, day_id, exercise_id)
+        )
+        await db.execute(
+            "UPDATE day_exercises SET order_num = ? WHERE day_id = ? AND exercise_id = ?",
+            (current_order, day_id, other_exercise_id)
         )
 
 

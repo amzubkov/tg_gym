@@ -10,7 +10,7 @@ from keyboards import (
     programs_kb, days_kb, admin_menu_kb,
     exercise_library_kb, lib_exercise_detail_kb,
     select_day_for_exercise_kb, add_exercise_to_day_kb,
-    library_exercises_for_day_kb
+    library_exercises_for_day_kb, exercises_kb
 )
 import database as db
 
@@ -1278,5 +1278,30 @@ async def remove_exercise_tag(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✅ Тег для «{exercise['name']}» удалён",
         reply_markup=exercise_detail_kb(exercise_id, day_id, is_admin=True)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("move_ex:"))
+async def move_exercise_order(callback: CallbackQuery):
+    """Переместить упражнение вверх/вниз в дне."""
+    parts = callback.data.split(":")
+    exercise_id = int(parts[1])
+    day_id = int(parts[2])
+    direction = int(parts[3])  # -1 вверх, 1 вниз
+
+    await db.move_exercise_in_day(exercise_id, day_id, direction)
+
+    # Обновляем клавиатуру
+    day = await db.get_day(day_id)
+    program = await db.get_program(day["program_id"])
+    exercises = await db.get_exercises_by_day(day_id)
+
+    day_name = day["name"] if day["name"] else f"День {day['day_number']}"
+    text = f"📋 {program['name']} — {day_name}\n\nВыбери упражнение:"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=exercises_kb(exercises, day_id, is_admin=True)
     )
     await callback.answer()
