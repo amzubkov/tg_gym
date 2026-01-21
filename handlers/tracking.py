@@ -467,7 +467,7 @@ async def add_record_exercise(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Упражнение не найдено", show_alert=True)
         return
 
-    weight_type = exercise.get("weight_type", 10)
+    weight_type = exercise["weight_type"] if "weight_type" in exercise.keys() else 10
 
     await state.update_data(
         exercise_id=exercise_id,
