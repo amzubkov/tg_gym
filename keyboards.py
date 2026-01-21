@@ -16,8 +16,8 @@ def main_menu_kb(has_active_program: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📚 Все тренировки", callback_data="all_workouts")
     )
     builder.row(
-        InlineKeyboardButton(text="✏️ Своё упражнение", callback_data="custom_exercise"),
-        InlineKeyboardButton(text="➕ Новое", callback_data="user_create_exercise")
+        InlineKeyboardButton(text="📝 Добавить запись", callback_data="add_record"),
+        InlineKeyboardButton(text="➕ Новое упражнение", callback_data="user_create_exercise")
     )
     builder.row(
         InlineKeyboardButton(text="🤖 Подобрать упражнения", callback_data="ai_exercises")
@@ -42,8 +42,8 @@ def admin_menu_kb(has_active_program: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📚 Все тренировки", callback_data="all_workouts")
     )
     builder.row(
-        InlineKeyboardButton(text="✏️ Своё упражнение", callback_data="custom_exercise"),
-        InlineKeyboardButton(text="➕ Новое", callback_data="user_create_exercise")
+        InlineKeyboardButton(text="📝 Добавить запись", callback_data="add_record"),
+        InlineKeyboardButton(text="➕ Новое упражнение", callback_data="user_create_exercise")
     )
     builder.row(
         InlineKeyboardButton(text="🤖 Подобрать AI упражнения", callback_data="ai_exercises")
@@ -494,6 +494,44 @@ def tag_exercises_kb(exercises: list, tag_name: str) -> InlineKeyboardMarkup:
 
 
 # ==================== QUICK INPUT ====================
+
+def date_select_kb(for_record: bool = False) -> InlineKeyboardMarkup:
+    """Выбор даты для записи тренировки."""
+    builder = InlineKeyboardBuilder()
+    prefix = "rec_date" if for_record else "date"
+    builder.row(
+        InlineKeyboardButton(text="📅 Сегодня", callback_data=f"{prefix}:today")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📅 Вчера", callback_data=f"{prefix}:yesterday")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📅 Другая дата", callback_data=f"{prefix}:custom")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action" if not for_record else "back_to_main")
+    )
+    return builder.as_markup()
+
+
+def exercise_select_kb(exercises: list) -> InlineKeyboardMarkup:
+    """Выбор упражнения из библиотеки для записи."""
+    builder = InlineKeyboardBuilder()
+    for ex in exercises:
+        builder.row(
+            InlineKeyboardButton(
+                text=ex['name'],
+                callback_data=f"rec_ex:{ex['id']}"
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="➕ Создать новое", callback_data="user_create_exercise")
+    )
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="add_record")
+    )
+    return builder.as_markup()
+
 
 def weight_kb(weight_type: int = 10) -> InlineKeyboardMarkup | None:
     """Быстрый выбор веса.

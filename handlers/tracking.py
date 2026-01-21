@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from keyboards import cancel_kb, weight_kb, reps_kb, sets_kb, after_log_kb
+from keyboards import cancel_kb, weight_kb, reps_kb, sets_kb, after_log_kb, date_select_kb, exercise_select_kb
 import database as db
 
 router = Router()
@@ -14,9 +14,15 @@ router = Router()
 
 class LogWorkout(StatesGroup):
     """Состояния для записи тренировки."""
+    waiting_for_date = State()
     waiting_for_weight = State()
     waiting_for_reps = State()
     waiting_for_sets = State()
+
+
+class AddRecord(StatesGroup):
+    """Состояния для добавления записи (из меню)."""
+    waiting_for_date = State()
 
 
 @router.callback_query(F.data.startswith("log:"))
@@ -35,9 +41,6 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
     if not exercise:
         await callback.answer("Упражнение не найдено", show_alert=True)
         return
-
-    user_id = callback.from_user.id
-    today = date.today().isoformat()
 
     # Если day_id=0, пытаемся найти первый день с этим упражнением
     if day_id == 0:
@@ -66,19 +69,42 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
         day_id=day_id,
         next_exercise_id=next_exercise_id,
         first_exercise_id=first_exercise_id,
-        weight_type=weight_type,
-        date=today
+        weight_type=weight_type
     )
+
+    # Спрашиваем дату
+    await state.set_state(LogWorkout.waiting_for_date)
+    await callback.message.answer(
+        f"💪 {exercise['name']}\n\n"
+        f"За какую дату записать?",
+        reply_markup=date_select_kb()
+    )
+    await callback.answer()
+
+
+async def proceed_to_weight(message_or_callback, state: FSMContext, user_id: int):
+    """Перейти к вводу веса после выбора даты."""
+    data = await state.get_data()
+    exercise_name = data["exercise_name"]
+    exercise_id = data["exercise_id"]
+    weight_type = data["weight_type"]
 
     # Если weight_type=0, пропускаем шаг с весом
     if weight_type == 0:
         await state.update_data(weight=0)
         await state.set_state(LogWorkout.waiting_for_reps)
-        await callback.message.answer(
-            f"💪 {exercise['name']}\n\n"
-            f"Выбери повторения:",
-            reply_markup=reps_kb()
-        )
+        if hasattr(message_or_callback, 'message'):
+            await message_or_callback.message.answer(
+                f"💪 {exercise_name}\n\n"
+                f"Выбери повторения:",
+                reply_markup=reps_kb()
+            )
+        else:
+            await message_or_callback.answer(
+                f"💪 {exercise_name}\n\n"
+                f"Выбери повторения:",
+                reply_markup=reps_kb()
+            )
     else:
         # Получаем последнюю тренировку для подсказки
         last_workout = await db.get_last_workout(user_id, exercise_id)
@@ -88,13 +114,76 @@ async def start_logging(callback: CallbackQuery, state: FSMContext):
             hint = f"\n\n💡 В прошлый раз: {last['weight']} кг × {last['reps']}"
 
         await state.set_state(LogWorkout.waiting_for_weight)
-        await callback.message.answer(
-            f"💪 {exercise['name']}\n\n"
-            f"Выбери вес (кг) или введи свой:{hint}",
-            reply_markup=weight_kb(weight_type)
-        )
+        if hasattr(message_or_callback, 'message'):
+            await message_or_callback.message.answer(
+                f"💪 {exercise_name}\n\n"
+                f"Выбери вес (кг) или введи свой:{hint}",
+                reply_markup=weight_kb(weight_type)
+            )
+        else:
+            await message_or_callback.answer(
+                f"💪 {exercise_name}\n\n"
+                f"Выбери вес (кг) или введи свой:{hint}",
+                reply_markup=weight_kb(weight_type)
+            )
 
-    await callback.answer()
+
+@router.callback_query(F.data.startswith("date:"))
+async def select_date(callback: CallbackQuery, state: FSMContext):
+    """Выбор даты для записи."""
+    from datetime import timedelta
+
+    date_choice = callback.data.split(":")[1]
+
+    if date_choice == "today":
+        selected_date = date.today().isoformat()
+        await state.update_data(date=selected_date)
+        await proceed_to_weight(callback, state, callback.from_user.id)
+        await callback.answer()
+    elif date_choice == "yesterday":
+        selected_date = (date.today() - timedelta(days=1)).isoformat()
+        await state.update_data(date=selected_date)
+        await proceed_to_weight(callback, state, callback.from_user.id)
+        await callback.answer()
+    elif date_choice == "custom":
+        await state.set_state(LogWorkout.waiting_for_date)
+        await callback.message.answer(
+            "Введи дату в формате ДД.ММ или ДД.ММ.ГГГГ:",
+            reply_markup=cancel_kb()
+        )
+        await callback.answer()
+
+
+@router.message(LogWorkout.waiting_for_date)
+async def process_custom_date(message: Message, state: FSMContext):
+    """Обработка ввода произвольной даты."""
+    text = message.text.strip()
+
+    # Парсим дату
+    try:
+        parts = text.split(".")
+        if len(parts) == 2:
+            day, month = int(parts[0]), int(parts[1])
+            year = date.today().year
+        elif len(parts) == 3:
+            day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+            if year < 100:
+                year += 2000
+        else:
+            raise ValueError("Invalid format")
+
+        selected_date = date(year, month, day)
+
+        # Проверяем что дата не в будущем
+        if selected_date > date.today():
+            await message.answer("❌ Нельзя записать тренировку в будущем. Попробуй ещё раз:")
+            return
+
+        await state.update_data(date=selected_date.isoformat())
+        await proceed_to_weight(message, state, message.from_user.id)
+
+    except (ValueError, IndexError):
+        await message.answer("❌ Неверный формат даты. Введи в формате ДД.ММ или ДД.ММ.ГГГГ:")
 
 
 # ==================== ВЕС ====================
@@ -259,3 +348,160 @@ async def save_workout(message, state: FSMContext, sets: int, is_callback: bool)
         await message.edit_text(result_text, parse_mode="HTML", reply_markup=kb)
     else:
         await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
+
+
+# ==================== ДОБАВИТЬ ЗАПИСЬ (из меню) ====================
+
+@router.callback_query(F.data == "add_record")
+async def add_record_start(callback: CallbackQuery, state: FSMContext):
+    """Начать добавление записи — выбор даты."""
+    await state.clear()
+    await callback.message.edit_text(
+        "📝 Добавить запись\n\n"
+        "За какую дату?",
+        reply_markup=date_select_kb(for_record=True)
+    )
+    await callback.answer()
+
+
+async def show_exercises_for_record(message, state: FSMContext, date_label: str):
+    """Показать список упражнений для записи."""
+    exercises = await db.get_all_exercises()
+    if not exercises:
+        from keyboards import cancel_kb
+        await message.edit_text(
+            "В библиотеке пока нет упражнений.\n"
+            "Сначала создай упражнение.",
+            reply_markup=cancel_kb()
+        )
+        return
+
+    await message.edit_text(
+        f"📅 {date_label}\n\n"
+        f"Выбери упражнение:",
+        reply_markup=exercise_select_kb(exercises)
+    )
+
+
+@router.callback_query(F.data.startswith("rec_date:"))
+async def add_record_date(callback: CallbackQuery, state: FSMContext):
+    """Выбор даты для записи."""
+    from datetime import timedelta
+
+    date_choice = callback.data.split(":")[1]
+
+    if date_choice == "today":
+        selected_date = date.today().isoformat()
+        await state.update_data(record_date=selected_date)
+        await show_exercises_for_record(callback.message, state, "Сегодня")
+        await callback.answer()
+    elif date_choice == "yesterday":
+        selected_date = (date.today() - timedelta(days=1)).isoformat()
+        await state.update_data(record_date=selected_date)
+        await show_exercises_for_record(callback.message, state, "Вчера")
+        await callback.answer()
+    elif date_choice == "custom":
+        await state.set_state(AddRecord.waiting_for_date)
+        await callback.message.edit_text(
+            "Введи дату в формате ДД.ММ или ДД.ММ.ГГГГ:",
+            reply_markup=cancel_kb()
+        )
+        await callback.answer()
+
+
+@router.message(AddRecord.waiting_for_date)
+async def add_record_custom_date(message: Message, state: FSMContext):
+    """Ввод произвольной даты для записи."""
+    text = message.text.strip()
+
+    try:
+        parts = text.split(".")
+        if len(parts) == 2:
+            day, month = int(parts[0]), int(parts[1])
+            year = date.today().year
+        elif len(parts) == 3:
+            day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+            if year < 100:
+                year += 2000
+        else:
+            raise ValueError("Invalid format")
+
+        selected_date = date(year, month, day)
+
+        if selected_date > date.today():
+            await message.answer("❌ Нельзя записать тренировку в будущем. Попробуй ещё раз:")
+            return
+
+        await state.update_data(record_date=selected_date.isoformat())
+        await state.set_state(None)
+
+        # Показываем список упражнений
+        exercises = await db.get_all_exercises()
+        if not exercises:
+            await message.answer(
+                "В библиотеке пока нет упражнений.\n"
+                "Сначала создай упражнение.",
+                reply_markup=cancel_kb()
+            )
+            return
+
+        await message.answer(
+            f"📅 {selected_date.strftime('%d.%m.%Y')}\n\n"
+            f"Выбери упражнение:",
+            reply_markup=exercise_select_kb(exercises)
+        )
+
+    except (ValueError, IndexError):
+        await message.answer("❌ Неверный формат даты. Введи в формате ДД.ММ или ДД.ММ.ГГГГ:")
+
+
+@router.callback_query(F.data.startswith("rec_ex:"))
+async def add_record_exercise(callback: CallbackQuery, state: FSMContext):
+    """Выбор упражнения из библиотеки — переход к записи."""
+    exercise_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    record_date = data.get("record_date", date.today().isoformat())
+
+    exercise = await db.get_exercise(exercise_id)
+    if not exercise:
+        await callback.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    weight_type = exercise.get("weight_type", 10)
+
+    await state.update_data(
+        exercise_id=exercise_id,
+        exercise_name=exercise["name"],
+        day_id=0,
+        next_exercise_id=None,
+        first_exercise_id=None,
+        weight_type=weight_type,
+        date=record_date
+    )
+
+    # Переходим к вводу веса
+    user_id = callback.from_user.id
+
+    if weight_type == 0:
+        await state.update_data(weight=0)
+        await state.set_state(LogWorkout.waiting_for_reps)
+        await callback.message.edit_text(
+            f"💪 {exercise['name']}\n\n"
+            f"Выбери повторения:",
+            reply_markup=reps_kb()
+        )
+    else:
+        last_workout = await db.get_last_workout(user_id, exercise_id)
+        hint = ""
+        if last_workout:
+            last = last_workout[0]
+            hint = f"\n\n💡 В прошлый раз: {last['weight']} кг × {last['reps']}"
+
+        await state.set_state(LogWorkout.waiting_for_weight)
+        await callback.message.edit_text(
+            f"💪 {exercise['name']}\n\n"
+            f"Выбери вес (кг) или введи свой:{hint}",
+            reply_markup=weight_kb(weight_type)
+        )
+
+    await callback.answer()
