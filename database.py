@@ -750,6 +750,52 @@ async def get_current_day_info(user_id: int) -> dict | None:
         }
 
 
+async def get_last_program_info(user_id: int) -> dict | None:
+    """Получить информацию о последней программе (даже если завершена)."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM user_progress WHERE user_id = ?",
+            (user_id,)
+        )
+        progress = await cursor.fetchone()
+
+        if not progress or not progress["program_id"]:
+            return None
+
+        cursor = await db.execute(
+            "SELECT * FROM programs WHERE id = ?",
+            (progress["program_id"],)
+        )
+        program = await cursor.fetchone()
+
+        if not program:
+            return None
+
+        # Получаем последний день (current_day_num или последний если завершена)
+        day_num = progress["current_day_num"]
+        cursor = await db.execute(
+            "SELECT * FROM days WHERE program_id = ? AND day_number = ?",
+            (progress["program_id"], day_num)
+        )
+        day = await cursor.fetchone()
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM days WHERE program_id = ?",
+            (progress["program_id"],)
+        )
+        total_days = (await cursor.fetchone())[0]
+
+        return {
+            "program_name": program["name"],
+            "program_id": program["id"],
+            "day_id": day["id"] if day else None,
+            "day_number": day_num,
+            "day_name": day["name"] if day else None,
+            "total_days": total_days,
+            "is_finished": progress["is_finished"]
+        }
+
+
 async def clear_user_progress(user_id: int):
     """Сбросить прогресс пользователя."""
     async with get_db() as db:

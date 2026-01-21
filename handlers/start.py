@@ -276,13 +276,22 @@ async def complete_day(callback: CallbackQuery):
                 exercises[name] = {"weight": c["weight"], "reps": c["reps"], "sets": 0}
             exercises[name]["sets"] += 1
 
-    # Если нет активной программы — просто показываем итог дня
+    # Если нет активной программы — показываем итог с информацией о последней программе
     if not current_day:
         if not exercises:
             await callback.answer("Нет записей за сегодня", show_alert=True)
             return
 
-        summary_lines = ["Итог дня", ""]
+        # Пытаемся получить информацию о последней программе
+        last_program = await db.get_last_program_info(user_id)
+
+        if last_program:
+            day_name = last_program["day_name"] or f"День {last_program['day_number']}"
+            header = f"{last_program['program_name']} - {day_name}"
+        else:
+            header = "Итог дня"
+
+        summary_lines = [header, ""]
         for i, (name, data) in enumerate(exercises.items(), 1):
             if "duration" in data:
                 summary_lines.append(f"{i}. {name}: {data['duration']}мин")
