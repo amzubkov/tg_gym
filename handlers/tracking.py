@@ -201,11 +201,18 @@ async def quick_weight(callback: CallbackQuery, state: FSMContext):
     await state.set_state(LogWorkout.waiting_for_reps)
 
     data = await state.get_data()
-    await callback.message.edit_text(
-        f"💪 {data['exercise_name']} — {format_weight(weight)}кг\n\n"
-        f"Выбери повторения:",
-        reply_markup=reps_kb()
-    )
+    try:
+        await callback.message.edit_text(
+            f"💪 {data['exercise_name']} — {format_weight(weight)}кг\n\n"
+            f"Выбери повторения:",
+            reply_markup=reps_kb()
+        )
+    except Exception:
+        await callback.message.answer(
+            f"💪 {data['exercise_name']} — {format_weight(weight)}кг\n\n"
+            f"Выбери повторения:",
+            reply_markup=reps_kb()
+        )
     await callback.answer()
 
 
@@ -247,11 +254,18 @@ async def quick_reps(callback: CallbackQuery, state: FSMContext):
     await state.set_state(LogWorkout.waiting_for_sets)
 
     data = await state.get_data()
-    await callback.message.edit_text(
-        f"💪 {data['exercise_name']} — {format_weight(data['weight'])}кг ×{reps}\n\n"
-        f"Сколько подходов?",
-        reply_markup=sets_kb()
-    )
+    try:
+        await callback.message.edit_text(
+            f"💪 {data['exercise_name']} — {format_weight(data['weight'])}кг ×{reps}\n\n"
+            f"Сколько подходов?",
+            reply_markup=sets_kb()
+        )
+    except Exception:
+        await callback.message.answer(
+            f"💪 {data['exercise_name']} — {format_weight(data['weight'])}кг ×{reps}\n\n"
+            f"Сколько подходов?",
+            reply_markup=sets_kb()
+        )
     await callback.answer()
 
 
@@ -345,7 +359,10 @@ async def save_workout(message, state: FSMContext, sets: int, is_callback: bool)
     )
 
     if is_callback:
-        await message.edit_text(result_text, parse_mode="HTML", reply_markup=kb)
+        try:
+            await message.edit_text(result_text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
     else:
         await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
 
