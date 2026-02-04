@@ -88,6 +88,12 @@ async def init_db():
         except Exception:
             pass  # Колонка уже существует
 
+        # Миграция: добавить media_type (photo или animation)
+        try:
+            await db.execute("ALTER TABLE exercises ADD COLUMN media_type TEXT DEFAULT 'photo'")
+        except Exception:
+            pass  # Колонка уже существует
+
         # Связь упражнений с днями (many-to-many)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS day_exercises (
@@ -318,17 +324,19 @@ async def create_exercise(
     description: str = None,
     image_file_id: str = None,
     tag: str = None,
-    weight_type: int = 10
+    weight_type: int = 10,
+    media_type: str = "photo"
 ) -> int:
     """Создать упражнение в библиотеке.
 
     weight_type: 0=без веса, 10=гантели, 100=штанга
+    media_type: 'photo' или 'animation' (GIF)
     """
     async with get_db() as db:
         cursor = await db.execute(
-            """INSERT INTO exercises (name, description, image_file_id, tag, weight_type)
-               VALUES (?, ?, ?, ?, ?)""",
-            (name, description, image_file_id, tag.lower() if tag else None, weight_type)
+            """INSERT INTO exercises (name, description, image_file_id, tag, weight_type, media_type)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (name, description, image_file_id, tag.lower() if tag else None, weight_type, media_type)
         )
         return cursor.lastrowid
 
@@ -459,12 +467,15 @@ async def get_exercise(exercise_id: int) -> dict | None:
         return await cursor.fetchone()
 
 
-async def update_exercise_image(exercise_id: int, image_file_id: str):
-    """Обновить картинку упражнения."""
+async def update_exercise_image(exercise_id: int, image_file_id: str, media_type: str = "photo"):
+    """Обновить картинку упражнения.
+
+    media_type: 'photo' или 'animation' (GIF)
+    """
     async with get_db() as db:
         await db.execute(
-            "UPDATE exercises SET image_file_id = ? WHERE id = ?",
-            (image_file_id, exercise_id)
+            "UPDATE exercises SET image_file_id = ?, media_type = ? WHERE id = ?",
+            (image_file_id, media_type, exercise_id)
         )
 
 

@@ -119,8 +119,8 @@ async def show_day_exercises(callback: CallbackQuery):
     text = f"📋 {program['name']} — {day_name}\n\nВыбери упражнение:"
     kb = exercises_kb(exercises, day_id, is_admin=is_admin)
 
-    # Если текущее сообщение — фото, удаляем и отправляем текст
-    if callback.message.photo:
+    # Если текущее сообщение — фото или GIF, удаляем и отправляем текст
+    if callback.message.photo or callback.message.animation:
         await callback.message.delete()
         await callback.message.answer(text, reply_markup=kb)
     else:
@@ -239,23 +239,31 @@ async def show_exercise(callback: CallbackQuery):
     else:
         kb = exercise_detail_kb(exercise_id, day_id, is_admin=is_admin, next_exercise_id=next_exercise_id, first_exercise_id=first_exercise_id)
 
-    # Если есть картинка — отправляем фото
+    # Если есть медиа — отправляем фото или GIF
     if exercise["image_file_id"]:
+        media_type = exercise.get("media_type", "photo")
         try:
-            # Удаляем старое сообщение и отправляем фото
+            # Удаляем старое сообщение и отправляем медиа
             await callback.message.delete()
-            await callback.message.answer_photo(
-                photo=exercise["image_file_id"],
-                caption=text,
-                reply_markup=kb
-            )
+            if media_type == "animation":
+                await callback.message.answer_animation(
+                    animation=exercise["image_file_id"],
+                    caption=text,
+                    reply_markup=kb
+                )
+            else:
+                await callback.message.answer_photo(
+                    photo=exercise["image_file_id"],
+                    caption=text,
+                    reply_markup=kb
+                )
         except Exception:
             # Если не получилось — просто текст
             await callback.message.edit_text(text, reply_markup=kb)
     else:
-        # Если это было фото — удаляем и отправляем текст
+        # Если это было фото/анимация — удаляем и отправляем текст
         try:
-            if callback.message.photo:
+            if callback.message.photo or callback.message.animation:
                 await callback.message.delete()
                 await callback.message.answer(text, reply_markup=kb)
             else:

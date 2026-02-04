@@ -247,7 +247,7 @@ async def process_lib_weight_type(callback: CallbackQuery, state: FSMContext):
     type_names = {0: "без веса", 10: "гантели", 100: "штанга"}
     await callback.message.edit_text(
         f"Тип веса: {type_names.get(weight_type, 'гантели')}\n\n"
-        "Теперь отправь картинку упражнения (или нажми Пропустить):",
+        "Теперь отправь фото или GIF упражнения (или нажми Пропустить):",
         reply_markup=skip_kb("skip_lib_image")
     )
     await callback.answer()
@@ -289,7 +289,7 @@ async def skip_lib_image(callback: CallbackQuery, state: FSMContext):
 
 @router.message(CreateExercise.waiting_for_image, F.photo)
 async def process_lib_image(message: Message, state: FSMContext):
-    """Обработка картинки."""
+    """Обработка фото."""
     data = await state.get_data()
 
     photo = message.photo[-1]
@@ -300,7 +300,8 @@ async def process_lib_image(message: Message, state: FSMContext):
         description=data.get("description"),
         image_file_id=file_id,
         tag=data.get("tag"),
-        weight_type=data.get("weight_type", 10)
+        weight_type=data.get("weight_type", 10),
+        media_type="photo"
     )
 
     # Если пришли из добавления в день - добавляем связь
@@ -323,11 +324,48 @@ async def process_lib_image(message: Message, state: FSMContext):
         )
 
 
+@router.message(CreateExercise.waiting_for_image, F.animation)
+async def process_lib_animation(message: Message, state: FSMContext):
+    """Обработка GIF."""
+    data = await state.get_data()
+
+    animation = message.animation
+    file_id = animation.file_id
+
+    exercise_id = await db.create_exercise(
+        name=data["exercise_name"],
+        description=data.get("description"),
+        image_file_id=file_id,
+        tag=data.get("tag"),
+        weight_type=data.get("weight_type", 10),
+        media_type="animation"
+    )
+
+    # Если пришли из добавления в день - добавляем связь
+    day_id = data.get("target_day_id")
+    if day_id:
+        await db.add_exercise_to_day(exercise_id, day_id)
+        day = await db.get_day(day_id)
+        day_name = day["name"] or f"День {day['day_number']}"
+        await state.clear()
+        await message.answer(
+            f"✅ Упражнение «{data['exercise_name']}» (GIF) создано и добавлено в {day_name}!",
+            reply_markup=admin_panel_kb()
+        )
+    else:
+        await state.clear()
+        tag_text = f" (#{data['tag']})" if data.get("tag") else ""
+        await message.answer(
+            f"✅ Упражнение «{data['exercise_name']}»{tag_text} (GIF) создано в библиотеке!",
+            reply_markup=exercise_library_kb(await db.get_all_exercises())
+        )
+
+
 @router.message(CreateExercise.waiting_for_image)
 async def wrong_lib_image_format(message: Message, state: FSMContext):
-    """Неправильный формат — ожидаем фото."""
+    """Неправильный формат — ожидаем фото или GIF."""
     await message.answer(
-        "Отправь картинку как фото, или нажми Пропустить:",
+        "Отправь фото или GIF, или нажми Пропустить:",
         reply_markup=skip_kb("skip_lib_image")
     )
 
