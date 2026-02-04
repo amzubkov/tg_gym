@@ -51,8 +51,8 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()  # Очищаем FSM состояние
     text, kb = await get_main_text_and_kb(callback.from_user.id)
 
-    # Если это фото — удаляем и отправляем текст
-    if callback.message.photo:
+    # Если это фото или GIF — удаляем и отправляем текст
+    if callback.message.photo or callback.message.animation:
         await callback.message.delete()
         await callback.message.answer(text, reply_markup=kb)
     else:

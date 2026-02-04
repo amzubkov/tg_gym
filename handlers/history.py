@@ -58,7 +58,7 @@ async def show_exercise_history(callback: CallbackQuery):
             text += f"📊 Стабильный вес: {last_max} кг"
 
     try:
-        if callback.message.photo:
+        if callback.message.photo or callback.message.animation:
             await callback.message.delete()
             await callback.message.answer(
                 text,
