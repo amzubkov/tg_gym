@@ -241,7 +241,7 @@ async def show_exercise(callback: CallbackQuery):
 
     # Если есть медиа — отправляем фото или GIF
     if exercise["image_file_id"]:
-        media_type = exercise.get("media_type", "photo")
+        media_type = exercise["media_type"] if "media_type" in exercise.keys() else "photo"
         try:
             # Удаляем старое сообщение и отправляем медиа
             await callback.message.delete()
