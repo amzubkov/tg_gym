@@ -83,8 +83,13 @@ def format_activity(activity: dict) -> str:
     for item in activity["workouts"]:
         name = item["name"]
         if name not in exercises:
-            exercises[name] = []
-        exercises[name].append(f"{item['weight']}×{item['reps']}")
+            exercises[name] = {"sets": [], "volume": 0}
+        exercises[name]["sets"].append((item['weight'], item['reps']))
+        # Объём: вес × повторения (если вес=0, считаем просто повторения)
+        if item['weight'] > 0:
+            exercises[name]["volume"] += item['weight'] * item['reps']
+        else:
+            exercises[name]["volume"] += item['reps']
 
     # Свои упражнения (силовые и кардио)
     for item in activity["custom"]:
@@ -96,11 +101,30 @@ def format_activity(activity: dict) -> str:
         else:
             # Силовое
             if name not in exercises:
-                exercises[name] = []
-            exercises[name].append(f"{item['weight']}×{item['reps']}")
+                exercises[name] = {"sets": [], "volume": 0}
+            weight = item['weight'] or 0
+            reps = item['reps'] or 0
+            exercises[name]["sets"].append((weight, reps))
+            if weight > 0:
+                exercises[name]["volume"] += weight * reps
+            else:
+                exercises[name]["volume"] += reps
 
-    for name, sets in exercises.items():
-        lines.append(f"• {name}: {', '.join(sets)}")
+    for name, data in exercises.items():
+        # Группируем одинаковые подходы
+        groups = {}
+        for weight, reps in data["sets"]:
+            key = (weight, reps)
+            groups[key] = groups.get(key, 0) + 1
+
+        sets_parts = []
+        for (weight, reps), count in groups.items():
+            weight_str = f"{int(weight)}" if weight == int(weight) else f"{weight}"
+            sets_str = f"×{count}" if count > 1 else ""
+            sets_parts.append(f"{weight_str}кг ×{reps}{sets_str}")
+
+        volume = int(data["volume"]) if data["volume"] == int(data["volume"]) else data["volume"]
+        lines.append(f"• {name}: итого:{volume} {', '.join(sets_parts)}")
 
     for name, total_mins in cardio.items():
         lines.append(f"• {name}: {format_duration(total_mins)}")
@@ -118,10 +142,6 @@ async def show_my_stats(callback: CallbackQuery):
     current_day = await db.get_current_day_info(user_id)
 
     today = date.today()
-    yesterday = today - timedelta(days=1)
-
-    today_activity = await db.get_daily_activity(user_id, today.isoformat())
-    yesterday_activity = await db.get_daily_activity(user_id, yesterday.isoformat())
 
     text = f"📊 Твоя статистика:\n\n"
 
@@ -144,11 +164,16 @@ async def show_my_stats(callback: CallbackQuery):
     else:
         text += f"Ещё нет тренировок\n\n"
 
-    text += f"📅 Сегодня ({today.strftime('%d.%m')}):\n"
-    text += format_activity(today_activity) + "\n\n"
-
-    text += f"📅 Вчера ({yesterday.strftime('%d.%m')}):\n"
-    text += format_activity(yesterday_activity)
+    # Последние 3 дня
+    day_names = ["Сегодня", "Вчера", "Позавчера"]
+    for i in range(3):
+        day = today - timedelta(days=i)
+        activity = await db.get_daily_activity(user_id, day.isoformat())
+        day_label = day_names[i] if i < len(day_names) else day.strftime('%d.%m')
+        formatted = format_activity(activity)
+        if formatted != "—":
+            text += f"📅 {day_label} ({day.strftime('%d.%m')}):\n"
+            text += formatted + "\n\n"
 
     is_admin = user_id == ADMIN_ID
     has_active = current_day is not None
