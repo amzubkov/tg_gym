@@ -218,9 +218,15 @@ async def show_exercise(callback: CallbackQuery):
 
             # Группируем одинаковые подходы (вес × повторения)
             groups = {}
+            total_volume = 0
             for log in workout["logs"]:
                 key = (log["weight"], log["reps"])
                 groups[key] = groups.get(key, 0) + 1
+                # Объём: вес × повторения (если вес=0, считаем просто повторения)
+                if log["weight"] > 0:
+                    total_volume += log["weight"] * log["reps"]
+                else:
+                    total_volume += log["reps"]
 
             # Форматируем подходы в одну строку
             sets_parts = []
@@ -229,7 +235,8 @@ async def show_exercise(callback: CallbackQuery):
                 sets_str = f"×{count}" if count > 1 else ""
                 sets_parts.append(f"{weight_str}кг ×{reps}{sets_str}")
 
-            text += f"  {date_str}: {', '.join(sets_parts)}\n"
+            total_str = f"{int(total_volume)}" if total_volume == int(total_volume) else f"{total_volume}"
+            text += f"  {date_str} итого:{total_str}: {', '.join(sets_parts)}\n"
 
     is_admin = user_id == ADMIN_ID
 
