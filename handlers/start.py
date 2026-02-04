@@ -296,7 +296,14 @@ async def complete_day(callback: CallbackQuery):
             if "duration" in data:
                 summary_lines.append(f"{i}. {name}: {data['duration']}мин")
             else:
-                summary_lines.append(f"{i}. {name}: {data['weight']}кг {data['reps']}×{data['sets']}")
+                weight = data['weight']
+                reps = data['reps']
+                sets = data['sets']
+                if weight > 0:
+                    volume = int(weight * reps * sets)
+                else:
+                    volume = reps * sets
+                summary_lines.append(f"{i}. {name}: итого:{volume} {weight}кг {reps}×{sets}")
 
         summary = "\n".join(summary_lines)
         copyable_summary = f"```\n{summary}\n```"
@@ -319,7 +326,14 @@ async def complete_day(callback: CallbackQuery):
         if "duration" in data:
             summary_lines.append(f"{i}. {name}: {data['duration']}мин")
         else:
-            summary_lines.append(f"{i}. {name}: {data['weight']}кг {data['reps']}×{data['sets']}")
+            weight = data['weight']
+            reps = data['reps']
+            sets = data['sets']
+            if weight > 0:
+                volume = int(weight * reps * sets)
+            else:
+                volume = reps * sets
+            summary_lines.append(f"{i}. {name}: итого:{volume} {weight}кг {reps}×{sets}")
 
     summary = "\n".join(summary_lines) if len(summary_lines) > 2 else "Нет записей"
     copyable_summary = f"```\n{summary}\n```"
